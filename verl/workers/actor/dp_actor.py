@@ -24,6 +24,8 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 from verl import DataProto
 from verl.trainer.ppo.core_algos import compute_policy_loss, kl_penalty, agg_loss
+from verl.trainer.dpo.core_algos import compute_dpo_sigmoid_loss
+
 from verl.workers.actor import BasePPOActor
 from verl.utils.py_functional import append_to_dict
 from verl.utils.torch_functional import logprobs_from_logits, masked_mean
@@ -343,5 +345,106 @@ class DataParallelPPOActor(BasePPOActor):
                 grad_norm = self._optimizer_step()
                 data = {'actor/grad_norm': grad_norm.detach().item()}
             append_to_dict(metrics, data)
+        self.actor_optimizer.zero_grad()
+        return metrics
+
+def update_policy_dpo(self, data: DataProto):
+    
+        # Set model to training mode.
+        self.actor_module.train()
+
+        # Temperature should be provided in data.meta_info.
+        temperature = data.meta_info.get("temperature", 1.0)
+
+        # The data should include keys for responses, input_ids, attention_mask, and optionally a provided chosen_mask.
+        select_keys = ['responses', 'input_ids', 'attention_mask']
+        batch = data.select(batch_keys=select_keys).batch
+
+        # Assume that the batch size of data is 2 * N, where N is the number of prompts.
+        # We also assume that a Boolean tensor 'chosen_mask' of shape (N,) is available.
+        if "chosen_mask" not in data.meta_info:
+            raise ValueError("DataProto must contain 'chosen_mask' in meta_info for DPO update.")
+        chosen_mask = data.meta_info["chosen_mask"].to(torch.bool)
+
+        # Split into mini-batches.
+        # Here we use the same mini-batch size as used for PPO updates.
+        mini_batch_size = self.config.ppo_mini_batch_size  # adjust as needed for DPO
+        dataloader = batch.split(mini_batch_size)
+
+        metrics = {}
+        # Loop over PPO epochs (if you want multiple passes over the mini-batch)
+        for epoch in range(self.config.ppo_epochs):
+            for mini_batch in dataloader:
+                # When mini_batch contains multi-modal inputs you may need additional handling.
+                # For now, we assume mini_batch is a plain dictionary of tensors.
+                # Split the mini_batch into micro-batches if needed.
+                if self.config.use_dynamic_bsz:
+                    # use the dynamic bsz splitting (if configured)
+                    max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
+                    micro_batches, _ = rearrange_micro_batches(batch=mini_batch, max_token_len=max_token_len)
+                else:
+                    # Otherwise, split the mini_batch into chunks using a fixed micro_batch size.
+                    micro_batch_size = self.config.ppo_micro_batch_size_per_gpu
+                    micro_batches = mini_batch.split(micro_batch_size)
+
+                # Zero the gradients once per mini-batch.
+                self.actor_optimizer.zero_grad()
+
+                # Iterate over micro-batches.
+                for micro_batch in micro_batches:
+                    # Move micro-batch to the appropriate device.
+                    if isinstance(micro_batch, DataProto):
+                        micro_batch = {**micro_batch.batch, **micro_batch.non_tensor_batch}
+                    else:
+                        micro_batch = micro_batch.to(torch.cuda.current_device())
+
+                    # Get responses and compute response_mask: assume responses are in micro_batch['responses']
+                    responses = micro_batch['responses']  # shape: (2*N_micro, response_length)
+                    response_length = responses.size(1)
+                    # Assume attention_mask has shape (2*N_micro, total_seq_length) and we extract last response_length tokens.
+                    attention_mask = micro_batch['attention_mask']
+                    response_mask = attention_mask[:, -response_length:]
+
+                    # Forward pass: compute log probabilities for the current policy.
+                    # _forward_micro_batch returns (entropy, log_probs)
+                    _, policy_logps = self._forward_micro_batch(micro_batch, temperature=temperature)
+                    # Expect policy_logps shape: (2 * batch_size, response_length)
+
+                    # Compute reference log probabilities using the reference model or by disabling grad.
+                    with torch.no_grad():
+                        _, ref_logps = self._forward_micro_batch(micro_batch, temperature=temperature)
+
+                    # For DPO loss, we assume the first half corresponds to one completion and the second half to the other.
+                    total_batch = policy_logps.size(0)
+                    if total_batch % 2 != 0:
+                        raise ValueError("For DPO update, batch size must be even (two completions per prompt).")
+                    base_batch_size = total_batch // 2
+
+                    # Select chosen vs. rejected responses using chosen_mask.
+                    # Here, chosen_mask should be a Boolean tensor of shape (base_batch_size,)
+                    policy_chosen_logps = torch.where(chosen_mask, policy_logps[:base_batch_size], policy_logps[base_batch_size:])
+                    policy_rejected_logps = torch.where(chosen_mask, policy_logps[base_batch_size:], policy_logps[:base_batch_size])
+                    ref_chosen_logps = torch.where(chosen_mask, ref_logps[:base_batch_size], ref_logps[base_batch_size:])
+                    ref_rejected_logps = torch.where(chosen_mask, ref_logps[base_batch_size:], ref_logps[:base_batch_size])
+
+                    # Compute the DPO loss using the provided helper (here, the sigmoid variant).
+                    dpo_loss, dpo_metrics = compute_dpo_sigmoid_loss(
+                        policy_chosen_logps, policy_rejected_logps,
+                        ref_chosen_logps, ref_rejected_logps,
+                        beta=self.config.algorithm.get("beta", 1.0),
+                        response_mask=response_mask)
+                    # Alternatively, if you want to use the IPO variant, call compute_dpo_ipo_loss instead.
+
+                    # Backpropagate the loss.
+                    dpo_loss.backward()
+
+                    # Optionally, you can accumulate metrics per micro-batch.
+                    append_to_dict(metrics, dpo_metrics)
+
+                # After processing all micro-batches in the mini-batch, perform the optimizer step.
+                grad_norm = self._optimizer_step()
+                append_to_dict(metrics, {"actor/grad_norm": grad_norm.detach().item()})
+            # End of epoch.
+        # Zero gradients one more time and return the aggregated metrics.
         self.actor_optimizer.zero_grad()
         return metrics
