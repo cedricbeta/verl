@@ -33,6 +33,8 @@ from verl.trainer.ppo.ray_trainer import Role, WorkerType, ResourcePoolManager, 
 from verl.trainer.ppo.metric_utils import _compute_response_info
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
+from . import dpo_core_algos
+
 
 def compute_pairwise_advantage(data: DataProto, config):
     """
@@ -63,33 +65,10 @@ def compute_pairwise_advantage(data: DataProto, config):
                 preference_mask[i] = (scores.argmax() == 0)
         
         # Compute pairwise advantages
-        advantages = torch.zeros_like(response_mask, dtype=torch.float32)
-        returns = torch.zeros_like(response_mask, dtype=torch.float32)
+        data = dpo_core_algos.compute_pairwise_advantage(data, response_mask, config.actor_rollout_ref.rollout.n, config)
         
-        # Set advantages based on preferences
-        for i in range(batch_size):
-            base_idx = i * config.actor_rollout_ref.rollout.n
-            for j in range(config.actor_rollout_ref.rollout.n):
-                # Get valid response length
-                valid_length = response_mask[base_idx + j].sum().item()
-                if valid_length > 0:
-                    # Set advantage value based on preference
-                    is_preferred = (j == 0 and preference_mask[i]) or (j == 1 and not preference_mask[i])
-                    advantage_value = 1.0 if is_preferred else -1.0
-                    
-                    # Apply to the final token for whole-sequence reward
-                    advantages[base_idx + j, valid_length - 1] = advantage_value
-                    returns[base_idx + j, valid_length - 1] = advantage_value
-                    
-                    # Or distribute across all tokens if configured
-                    if config.algorithm.get("token_level_advantage", False):
-                        advantages[base_idx + j, :valid_length] = advantage_value / valid_length
-        
-        data.batch['advantages'] = advantages
-        data.batch['returns'] = returns
-        # data.batch['preference_mask'] = preference_mask
-        data.batch['preference_mask'] = preference_mask.repeat_interleave(config.actor_rollout_ref.rollout.n)
-
+        # Add preference mask for logging and metrics
+        data.batch['preference_mask'] = preference_mask
         
     else:
         raise ValueError("No reward scores found in batch data")
@@ -151,6 +130,8 @@ def compute_data_metrics(batch, use_critic=True):
             torch.min(valid_returns).detach().item(),
         **({
             # values
+        # returns
+        # values
             'critic/values/mean': torch.mean(valid_values).detach().item(),
             'critic/values/max': torch.max(valid_values).detach().item(),
             'critic/values/min': torch.min(valid_values).detach().item(),
@@ -189,7 +170,7 @@ def compute_timing_metrics(batch, timing_raw):
     num_tokens_of_section = {
         'gen': num_response_tokens,
         **{
-            name: num_overall_tokens for name in ['ref', 'values', 'adv', 'update_critic', 'update_actor', 'update_actor_dpo']
+            name: num_overall_tokens for name in ['ref', 'values', 'adv', 'update_critic', 'update_actor']
         },
     }
 
@@ -259,7 +240,8 @@ class RayDPOTrainer(RayPPOTrainer):
 
         # Create train dataloader
         self.train_dataloader = DataLoader(dataset=self.train_dataset,
-                                           batch_size=int(self.config.data.train_batch_size),
+                                           batch_size=int(self.config.data.train_batch_size *
+                                                          self.config.data.oversample_factor),
                                            drop_last=True,
                                            collate_fn=collate_fn,
                                            sampler=sampler)
@@ -452,9 +434,7 @@ class RayDPOTrainer(RayPPOTrainer):
                     # Repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
-                    # Re-add "position_ids" if missing.
-                    if 'position_ids' not in batch:
-                        batch['position_ids'] = gen_batch['position_ids']
+
                     # Track token counts
                     batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'], dim=-1).tolist()
 
@@ -485,20 +465,9 @@ class RayDPOTrainer(RayPPOTrainer):
                         # Compute pairwise advantages
                         batch = compute_pairwise_advantage(batch, config=self.config)
 
-                    # Update actor using DPO-specific method
-                    with _timer('update_actor_dpo', timing_raw):
-                        # Add chosen_mask to batch's meta_info based on preferences
-                        if 'preference_mask' in batch.batch:
-                            batch.meta_info['chosen_mask'] = batch.batch['preference_mask']
-                        else:
-                            raise ValueError("No preference information available for DPO update")
-                        
-                        # Add temperature parameter if not present
-                        if 'temperature' not in batch.meta_info:
-                            batch.meta_info['temperature'] = self.config.algorithm.get('temperature', 1.0)
-                        
-                        # Call the DPO-specific actor update method
-                        actor_output = self.actor_rollout_wg.update_actor_dpo(batch)
+                    # Update actor
+                    with _timer('update_actor', timing_raw):
+                        actor_output = self.actor_rollout_wg.update_actor(batch)
                     
                     actor_output_metrics = reduce_metrics(actor_output.meta_info['metrics'])
                     metrics.update(actor_output_metrics)
@@ -548,33 +517,33 @@ class RayDPOTrainer(RayPPOTrainer):
                             self._save_checkpoint()
                     return
 
-    # def filter_and_downsample(self, scores, batch: DataProto):
-    #     """
-    #     Downsample the batch according to oversample_factor.
-    #     Samples passing the filters will be prioritized.
-    #     """
-    #     n_samples = int(self.config.actor_rollout_ref.rollout.n)
-    #     reward_matrix = torch.tensor(scores).reshape(-1, n_samples)
+    def filter_and_downsample(self, scores, batch: DataProto):
+        """
+        Downsample the batch according to oversample_factor.
+        Samples passing the filters will be prioritized.
+        """
+        n_samples = int(self.config.actor_rollout_ref.rollout.n)
+        reward_matrix = torch.tensor(scores).reshape(-1, n_samples)
 
-    #     filter_mask = torch.ones((reward_matrix.shape[0]), dtype=torch.bool)
+        filter_mask = torch.ones((reward_matrix.shape[0]), dtype=torch.bool)
 
-    #     # Apply quality filters if configured
-    #     if self.config.data.filter_accuracy:
-    #         acc_tensor = torch.mean(reward_matrix, dim=-1)
-    #         filter_mask[(acc_tensor > self.config.data.accuracy_upper_bound) |
-    #                     (acc_tensor < self.config.data.accuracy_lower_bound)] = False
+        # Apply quality filters if configured
+        if self.config.data.filter_accuracy:
+            acc_tensor = torch.mean(reward_matrix, dim=-1)
+            filter_mask[(acc_tensor > self.config.data.accuracy_upper_bound) |
+                        (acc_tensor < self.config.data.accuracy_lower_bound)] = False
 
-    #     # Filter based on truncation
-    #     if self.config.data.filter_truncate:
-    #         length_matrix = batch.batch['attention_mask'][:, -batch.batch['responses'].shape[-1]:].sum(dim=-1).reshape(
-    #             -1, n_samples)
-    #         length_tensor = torch.max(length_matrix, dim=-1)[0]
-    #         filter_mask[length_tensor >= self.config.data.max_response_length - 1] = False
+        # Filter based on truncation
+        if self.config.data.filter_truncate:
+            length_matrix = batch.batch['attention_mask'][:, -batch.batch['responses'].shape[-1]:].sum(dim=-1).reshape(
+                -1, n_samples)
+            length_tensor = torch.max(length_matrix, dim=-1)[0]
+            filter_mask[length_tensor >= self.config.data.max_response_length - 1] = False
 
-    #     # Reorder to prioritize filtered samples
-    #     reorder_index = torch.argsort(filter_mask, descending=True)
-    #     reorder_index = (reorder_index.unsqueeze(-1) * n_samples + torch.arange(0, n_samples).unsqueeze(0)).view(-1)
-    #     batch.reorder(reorder_index[:int(len(batch) //
-    #                                      self.config.data.oversample_factor)])  # this operation is inplace
+        # Reorder to prioritize filtered samples
+        reorder_index = torch.argsort(filter_mask, descending=True)
+        reorder_index = (reorder_index.unsqueeze(-1) * n_samples + torch.arange(0, n_samples).unsqueeze(0)).view(-1)
+        batch.reorder(reorder_index[:int(len(batch) //
+                                         self.config.data.oversample_factor)])  # this operation is inplace
 
-    #     return batch
+        return batch

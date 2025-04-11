@@ -203,11 +203,9 @@ class TaskRunner:
         # Create and run DPO trainer
         trainer = RayDPOTrainer(config=config,
                                tokenizer=tokenizer,
-                               processor=processor,
                                role_worker_mapping=role_worker_mapping,
                                resource_pool_manager=resource_pool_manager,
                                ray_worker_group_cls=ray_worker_group_cls,
-                               judge_fn=judge_fn,
                                val_reward_fn=val_reward_manager)
                                
         trainer.init_workers()

@@ -1,0 +1,141 @@
+# DPO Trainer Configuration for Qwen2.5 7B
+
+# Data configuration
+data:
+  train_files: ["${oc.env:HOME}/data/gsm8k/train.parquet"]
+  val_files: ["${oc.env:HOME}/data/gsm8k/test.parquet"]
+  train_batch_size: 64
+  val_batch_size: 64
+  max_prompt_length: 1024
+  max_response_length: 3072
+  prompt_key: "prompt"
+  filter_overlong_prompts: true
+  filter_accuracy: true
+  accuracy_lower_bound: 0.2
+  accuracy_upper_bound: 0.8
+  oversample_factor: 4
+  shuffle: true
+  seed: 42
+  return_raw_chat: false
+
+# Actor, rollout, and reference model configuration
+actor_rollout_ref:
+  model:
+    path: "Qwen/Qwen2.5-7B-Instruct"
+    tokenizer_path: "Qwen/Qwen2.5-7B-Instruct"
+    trust_remote_code: true  # Required for Qwen tokenizer
+    use_remove_padding: true
+    enable_gradient_checkpointing: true
+    override_config:
+      use_cache: false  # For gradient checkpointing compatibility
+
+  actor:
+    strategy: "fsdp"
+    optim:
+      lr: 5e-7
+      weight_decay: 0.01
+      lr_warmup_steps_ratio: 0.1
+      grad_clip: 1.0
+    use_kl_loss: false
+    ppo_mini_batch_size: 64
+    ppo_micro_batch_size_per_gpu: 1
+    fsdp_config:
+      fsdp_size: null  # Auto-set based on world size
+      param_offload: true
+      optimizer_offload: true
+      model_dtype: "bf16"
+      wrap_policy:
+        transformer_layer_cls: ["Qwen2MLP", "Qwen2Attention"]  # Qwen-specific layers
+
+  rollout:
+    name: "vllm"
+    n: 4  # Number of samples per prompt
+    temperature: 0.7
+    top_p: 0.9
+    tensor_model_parallel_size: 1
+    log_prob_micro_batch_size_per_gpu: 32
+    gpu_memory_utilization: 0.6
+    use_beam_search: false
+
+  ref:
+    name: "vllm"
+    tensor_model_parallel_size: 1
+    log_prob_micro_batch_size_per_gpu: 32
+    gpu_memory_utilization: 0.6
+
+# Algorithm configuration
+algorithm:
+  adv_estimator: "dpo"  # Direct Preference Optimization
+  beta: 0.1  # Temperature parameter for DPO
+  loss_type: "sigmoid"  # Options: "sigmoid" or "ipo"
+  token_level_advantage: false  # If true, distribute advantage across all tokens
+  use_ground_truth: false  # If true, use ground truth preferences when available
+  use_kl_in_reward: true  # If true, add KL divergence to reward
+  kl_penalty: "kl"
+  kl_ctrl:
+    kl_coef: 0.001
+
+# Reward model configuration
+reward_model:
+  enable: true
+  model:
+    path: "Qwen/Qwen2.5-7B-Instruct"  # Using same model as policy
+    ref_path: "Qwen/Qwen2.5-7B-Instruct"  # Reference model path
+    tokenizer_path: "Qwen/Qwen2.5-7B-Instruct"
+    trust_remote_code: true  # Required for Qwen tokenizer
+    use_remove_padding: true
+    update: "before"  # Options: "none", "before", "after", "reverse"
+    beta_train: 0.1
+    loss_type: "sigmoid"  # Options: "sigmoid", "ipo"
+    optim:
+      lr: 1e-6
+      weight_decay: 0.01
+      lr_warmup_steps_ratio: 0.1
+      grad_clip: 10.0
+    fsdp_config:
+      fsdp_size: null
+      param_offload: true
+      optimizer_offload: true
+      model_dtype: "bf16"
+      wrap_policy:
+        transformer_layer_cls: ["Qwen2MLP", "Qwen2Attention"]  # Qwen-specific layers
+  micro_batch_size_per_gpu: 1
+  mini_batch_size: 64
+  reward_manager: "naive"
+  dpo_granularity: "whole"  # Options: "token" or "whole"
+  dpo_norm: "batch_norm"
+
+# Critic model (not used in DPO, but kept for compatibility)
+critic:
+  strategy: "fsdp"
+  optim:
+    lr: 5e-6
+    weight_decay: 0.01
+    lr_warmup_steps_ratio: 0.1
+    grad_clip: 1.0
+
+# Trainer configuration
+trainer:
+  project_name: "dpo_example"
+  experiment_name: "Qwen2.5-7B-DPO-gsm8k"
+  n_gpus_per_node: 8
+  nnodes: 1
+  default_local_dir: "./checkpoints"
+  default_hdfs_dir: null
+  test_freq: 64
+  save_freq: 64
+  val_before_train: false
+  val_only: false
+  total_epochs: 15
+  total_training_steps: null  # If null, calculated as len(dataloader) * total_epochs
+  remove_previous_ckpt_in_save: true
+  del_local_ckpt_after_load: true
+  resume_mode: "auto"  # Options: "auto", "disable", "resume_path"
+  resume_from_path: null
+  logger: ["console", "wandb"]
+
+# Distributed training configuration
+use_dynamic_bsz: true
+forward_max_token_len_per_gpu: 32768
+dpo_max_token_len_per_gpu: 32768
+ulysses_sequence_parallel_size: 1

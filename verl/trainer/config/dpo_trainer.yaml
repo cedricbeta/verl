@@ -35,6 +35,7 @@ actor_rollout_ref:
     clip_ratio: 0.2
     entropy_coeff: 0.001
     use_kl_loss: False  # Set True for GRPO.
+    loss_agg_mode: "token-mean"
     use_torch_compile: True  # Disable if necessary.
     kl_loss_coef: 0.001  # For GRPO.
     kl_loss_type: low_var_kl  # For GRPO.
