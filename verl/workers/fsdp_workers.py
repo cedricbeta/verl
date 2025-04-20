@@ -701,6 +701,7 @@ class CriticWorker(Worker):
         torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
         from transformers import AutoConfig, AutoModelForTokenClassification
+        from transformers import Qwen2_5_VLForConditionalGeneration
         from torch import nn
 
         trust_remote_code = False
@@ -714,7 +715,7 @@ class CriticWorker(Worker):
             warnings.simplefilter("ignore")
             setattr(critic_model_config, 'classifier_dropout', 0.)
             setattr(critic_model_config, 'hidden_dropout', '0')
-            critic_module = AutoModelForTokenClassification.from_pretrained(pretrained_model_name_or_path=local_path,
+            critic_module = Qwen2_5_VLForConditionalGeneration.from_pretrained(pretrained_model_name_or_path=local_path,
                                                                             torch_dtype=torch_dtype,
                                                                             config=critic_model_config,
                                                                             attn_implementation='flash_attention_2',

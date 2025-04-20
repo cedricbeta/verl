@@ -284,6 +284,11 @@ class RLHFDataset(Dataset):
         # add index for each prompt
         index = row_dict.get("extra_info", {}).get("index", 0)
         row_dict["index"] = index
+        row_dict["ground_truth"] = row_dict.get('solution')
+        # --- End Ground Truth Loading ---
+
+        # row_dict['video_length'] = row_dict.get('video_length')
+        row_dict['problem_type'] = 'tvg'
 
         return row_dict
 
