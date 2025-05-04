@@ -941,9 +941,9 @@ class RaySPINTrainer(object):
         # Initialize logger
         logger = None
 
-        logger = Tracking(project_name="verl_biao",
+        logger = Tracking(project_name="verl_biao_h200",
                             experiment_name="verl_biao_spin",
-                            default_backend=self.config.trainer.logger,
+                            default_backend=["console", "mlflow"],
                             config=OmegaConf.to_container(self.config, resolve=True, throw_on_missing=False))
         print(f"logger: {logger}")
         self.global_steps = 0

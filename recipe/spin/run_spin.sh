@@ -3,12 +3,14 @@ set -x
 export WANDB_API_KEY="324f1526c5559d81acdf0e40dddc9222f30965e1"
 export HF_HUB_OFFLINE=1
 export HYDRA_FULL_ERROR=1
+export HTTPS_PROXY=""
+unset HTTPS_PROXY
 VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
 
 CUDA_VISIBLE_DEVICES=${VISIBLE_DEVICES} python3 -m recipe.spin.main_spin \
   data.train_files=/shared/user/bhe/data/verl/gsm8k/train.parquet \
   data.val_files=/shared/user/bhe/data/verl/gsm8k/test.parquet \
-  data.train_batch_size=32 \
+  data.train_batch_size=1024 \
   data.max_prompt_length=1024 \
   data.max_response_length=1024 \
   actor_rollout_ref.model.path=/shared/public/models/Qwen/Qwen2.5-7B-Instruct \
