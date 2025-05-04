@@ -390,6 +390,7 @@ class ActorRolloutRefWorker(Worker):
 
             if torch.distributed.get_world_size() == 1:
                 self.config.rollout.load_format = "dummy_hf"
+            # offload model here
             rollout_sharding_manager = FSDPSGLangShardingManager(
                 module=self.actor_module_fsdp,
                 inference_engine=rollout.inference_engine,
@@ -1278,3 +1279,4 @@ class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
         if self.vllm_tp_rank == 0 and method != "execute_model":
             print(f"[DP={self.vllm_dp_rank},TP={self.vllm_tp_rank}] execute_method: {method if isinstance(method, str) else 'Callable'}")
         return self.rollout.execute_method(method, *args, **kwargs)
+
