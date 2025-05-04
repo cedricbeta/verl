@@ -74,7 +74,7 @@ class TaskRunner:
         OmegaConf.resolve(config)
 
         # download the checkpoint from hdfs
-        local_path = copy_to_local(config.actor_rollout_ref.model.path)
+        local_path = config.actor_rollout_ref.model.path
 
         # instantiate tokenizer
         from verl.utils import hf_tokenizer, hf_processor

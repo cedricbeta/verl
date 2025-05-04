@@ -940,14 +940,12 @@ class RaySPINTrainer(object):
 
         # Initialize logger
         logger = None
-        try:
-            logger = Tracking(project_name=self.config.trainer.project_name,
-                              experiment_name=self.config.trainer.experiment_name,
-                              default_backend=self.config.trainer.logger,
-                              config=OmegaConf.to_container(self.config, resolve=True, throw_on_missing=False))
-        except Exception as e:
-            print(f"Warning: Failed to initialize logger: {e}")
 
+        logger = Tracking(project_name="verl_biao",
+                            experiment_name="verl_biao_spin",
+                            default_backend=self.config.trainer.logger,
+                            config=OmegaConf.to_container(self.config, resolve=True, throw_on_missing=False))
+        print(f"logger: {logger}")
         self.global_steps = 0
         # Load checkpoint before doing anything
         loaded_step = self._load_checkpoint()

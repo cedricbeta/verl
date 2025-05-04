@@ -80,7 +80,8 @@ actor_rollout_ref:
     log_prob_max_token_len_per_gpu: ${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}
     ulysses_sequence_parallel_size: ${actor_rollout_ref.actor.ulysses_sequence_parallel_size} # sp size
   rollout:
-    name: sglang
+    name: vllm
+    
     temperature: 1.0
     top_k: -1 # 0 for hf rollout, -1 for vllm rollout
     top_p: 1
@@ -201,7 +202,7 @@ trainer:
   total_training_steps: null
   project_name: verl_spin
   experiment_name: gsm8k
-  logger: [ 'console', 'wandb' ]
+  logger: [ 'console', 'mlflow' ]
   log_val_generations: 0
   nnodes: 1
   n_gpus_per_node: 8

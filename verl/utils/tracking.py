@@ -49,7 +49,7 @@ class Tracking:
 
             import mlflow
 
-            MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", None)
+            MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow.grid1.ard.grid.linkedin.com:31812")
             if MLFLOW_TRACKING_URI:
                 mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 
