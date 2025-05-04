@@ -3,20 +3,20 @@ set -x
 export VLLM_ATTENTION_BACKEND=XFORMERS
 export VLLM_USE_V1=0
 MODEL_PATH=/home/chendong/video-rl/Temporal-R1/Temporal-R1-3B-Charades
-
+VISIBLE_DEVICES="3"
 # Assuming the modified YAML is named grpo_example.yaml in the config directory
 # If you renamed it, use --config-name=your_new_name
-python3 -m verl.trainer.main_vqa \
+CUDA_VISIBLE_DEVICES=${VISIBLE_DEVICES} python3 -m verl.trainer.main_vqa \
     data.train_files=/home/chendong/video-rl/charades_sta/charades_train_verl_abs.json \
     data.val_files=/home/chendong/video-rl/charades_sta/charades_stas_test_reformatted.json \
     data.max_prompt_length=4096 \
     data.max_response_length=2048 \
-    data.train_batch_size=4 \
+    data.train_batch_size=1 \
     data.shuffle=true \
     data.filter_overlong_prompts=false \
     actor_rollout_ref.model.path=${MODEL_PATH} \
     actor_rollout_ref.actor.strategy=fsdp \
-    actor_rollout_ref.actor.ppo_mini_batch_size=4 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=1 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2 \
     actor_rollout_ref.actor.entropy_coeff=1e-3 \
     actor_rollout_ref.actor.use_kl_loss=true \
@@ -33,11 +33,11 @@ python3 -m verl.trainer.main_vqa \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     critic.ppo_max_token_len_per_gpu=16384 \
-    critic.rollout_n=2 \
+    critic.rollout_n=1 \
     trainer.project_name=video_tvg \
     trainer.experiment_name=qwen2_5_vl_3b_tvg \
     trainer.nnodes=1 \
-    trainer.n_gpus_per_node=4 \
+    trainer.n_gpus_per_node=1 \
     trainer.val_before_train=False \
     trainer.save_freq=500 \
     trainer.logger='["console"]' 2>&1 | tee tvg.log
