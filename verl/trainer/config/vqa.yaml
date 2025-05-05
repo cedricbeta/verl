@@ -192,7 +192,7 @@ custom_reward_function:
 algorithm:
   gamma: 1.0
   lam:   1.0
-  adv_estimator: grpo
+  adv_estimator: reinforce_plus_plus
   use_kl_in_reward: false
   kl_penalty: kl
   kl_ctrl:

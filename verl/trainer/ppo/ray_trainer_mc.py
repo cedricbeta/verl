@@ -55,7 +55,7 @@ from typing import List, Dict, Any, Optional, Union
 import verl.utils.torch_functional as verl_F
 from verl.utils.model import compute_position_id_with_mask
 from qwen_vl_utils import fetch_video
-
+from pprint import pprint, pformat
 from tensordict import TensorDict
 
 WorkerType = Type[Worker]
@@ -673,7 +673,7 @@ class RayPPOTrainer(object):
         from verl.utils.dataset.vqa_dataset import TwoStageVideoQADataset
         
         two_stage_dataset = TwoStageVideoQADataset(
-            data_files="/home/chendong/video-rl/charades_sta/charades_vqa.jsonl",
+            data_files="/root/data/charades_vqa.jsonl",
             tokenizer=self.tokenizer,
             processor=self.processor,
             config=self.config.data,
@@ -704,9 +704,239 @@ class RayPPOTrainer(object):
             self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
             self.config.critic.optim.total_training_steps = total_training_steps
         
+        try:
+             # Use validation files specified in config
+             vqa_val_files = self.config.data.get("vqa_val_files", self.config.data.val_files)
+             if not vqa_val_files:
+                  print("[WARN] No specific 'vqa_val_files' found in config.data, falling back to 'val_files'. Ensure these contain VQA data.")
+                  vqa_val_files = self.config.data.val_files
+             if not vqa_val_files:
+                  raise ValueError("No validation files found for VQA validation.")
+
+             self.vqa_val_dataset = TwoStageVideoQADataset(
+                 data_files=vqa_val_files,
+                 tokenizer=self.tokenizer,
+                 processor=self.processor,
+                 config=self.config.data, # Use the same data config
+             )
+
+             # Validation: typically no shuffle, run as one large batch
+             self.vqa_val_dataloader = StatefulDataLoader(
+                 dataset=self.vqa_val_dataset,
+                 batch_size=len(self.vqa_val_dataset), # Process all validation data at once
+                 num_workers=self.config.data.get("val_num_workers", 4), # Use separate config or default
+                 shuffle=False,
+                 drop_last=False,
+                 collate_fn=collate_fn # Use the same collate function
+             )
+             print(f"VQA Validation Dataloader created with {len(self.vqa_val_dataset)} samples.")
+             assert len(self.vqa_val_dataloader) == 1, "VQA Validation dataloader should process all data in one batch."
+
+        except Exception as e:
+             print(f"[ERROR] Failed to create VQA validation dataloader: {e}")
+             print("[WARN] VQA Validation will be skipped.")
+             self.vqa_val_dataloader = None # Ensure it's None if creation fails
+        # --- End VQA Validation Dataloader ---
         
         
 
+    def _validate_vqa(self):
+        """
+        Performs validation using the two-stage VQA process and calls self.val_reward_fn.
+        """
+        print("[DEBUG] --- Running _validate_vqa (using val_reward_fn) ---")
+        if not hasattr(self, 'vqa_val_dataloader') or self.vqa_val_dataloader is None:
+             print("[WARN] VQA Validation Dataloader not available. Skipping VQA validation.")
+             return {}
+
+        # Store detailed results per validation sample
+        all_vqa_val_results = []
+        # Store aggregated metrics dictionary returned by the reward function
+        reward_extra_infos_dict = defaultdict(list) # Will be populated by val_reward_fn output
+
+        # Validation loop should only run once
+        for val_i, batch_dict in enumerate(self.vqa_val_dataloader):
+            if val_i > 0: print("[WARN] VQA Validation dataloader has more than one batch!"); break
+            if not batch_dict: print("[DEBUG VQA VAL] Empty batch dict in validation dataloader."); continue
+
+            try:
+                full_batch_proto = DataProto.from_single_dict(batch_dict)
+                if not full_batch_proto or len(full_batch_proto) == 0:
+                     print("[DEBUG VQA VAL] Empty DataProto in validation dataloader."); continue
+                current_batch_size = len(full_batch_proto)
+                print(f"[DEBUG VQA VAL] Processing validation batch size: {current_batch_size}")
+            except Exception as e:
+                 print(f"[ERROR VQA VAL] Failed to load validation batch: {e}"); continue
+
+            # --- Stage 1: Grounding Generation ---
+            print("[DEBUG VQA VAL] -- Stage 1: Generating Grounding --")
+            # ... (Stage 1 generation logic - same as before) ...
+            stage1_gen_output = None
+            decoded_grounding_texts = ["<S1 VAL Gen Failed>"] * current_batch_size
+            predicted_times = [(None, None)] * current_batch_size
+            try:
+                stage1_batch_keys = ['input_ids', 'attention_mask', 'position_ids']
+                stage1_non_tensor_keys = ['multi_modal_inputs']
+                actual_s1_batch_keys = [k for k in stage1_batch_keys if k in full_batch_proto.batch]
+                actual_s1_non_tensor_keys = [k for k in stage1_non_tensor_keys if k in full_batch_proto.non_tensor_batch]
+                if not actual_s1_batch_keys: raise ValueError("Missing Stage 1 keys for validation.")
+                stage1_gen_batch = DataProto(
+                   batch=full_batch_proto.batch.select(*actual_s1_batch_keys),
+                   non_tensor_batch={k: full_batch_proto.non_tensor_batch[k] for k in actual_s1_non_tensor_keys}
+                )
+                stage1_gen_batch.meta_info = {'eos_token_id': self.tokenizer.eos_token_id, 'pad_token_id': self.tokenizer.pad_token_id, 'do_sample': False, 'validate': True}
+                stage1_gen_output = self.actor_rollout_wg.generate_sequences(stage1_gen_batch)
+                stage1_responses = stage1_gen_output.batch.get('responses')
+                if stage1_responses is None: raise ValueError("Stage 1 VAL failed (no responses).")
+                decoded_grounding_texts = self.tokenizer.batch_decode(stage1_responses, skip_special_tokens=True)
+                predicted_times = parse_grounding_times(decoded_grounding_texts)
+            except Exception as e:
+                print(f"[ERROR VQA VAL] Error during Stage 1 validation: {e}")
+                # Treat all items as having failed Stage 1 if error occurs
+
+            # --- Stage 2: Prepare Inputs & Generate QA ---
+            print("[DEBUG VQA VAL] -- Stage 2: Preparing & Generating QA --")
+            # ... (Stage 2 Prep logic - same as before, prepares stage2_processed_inputs & valid_original_indices_s2) ...
+            stage2_processed_inputs = []
+            valid_original_indices_s2 = []
+            for idx in range(current_batch_size):
+                try:
+                    start_t_pred, end_t_pred = predicted_times[idx]
+                    video_path = full_batch_proto.non_tensor_batch["video_path"][idx]
+                    video_config = full_batch_proto.non_tensor_batch["video_processing_config"][idx]
+                    question_text = full_batch_proto.non_tensor_batch["question_text"][idx]
+                    gt_start_time = full_batch_proto.non_tensor_batch['start_time'][idx]
+                    gt_end_time = full_batch_proto.non_tensor_batch['end_time'][idx]
+
+                    # Validation Strategy: Use GT times first
+                    start_t_final, end_t_final = gt_start_time, gt_end_time; clip_source = "GT"
+                    if start_t_final is None or end_t_final is None or not isinstance(start_t_final, (int, float)) or not isinstance(end_t_final, (int, float)) or start_t_final < 0 or start_t_final >= end_t_final:
+                        start_t_final, end_t_final = start_t_pred, end_t_pred; clip_source = "Predicted"
+                        if start_t_final is None or end_t_final is None or not isinstance(start_t_final, (int, float)) or not isinstance(end_t_final, (int, float)) or start_t_final < 0 or start_t_final >= end_t_final:
+                            start_t_final, end_t_final = 0.0, None; clip_source = "Full (Fallback)"
+
+                    base_config = video_config.copy()
+                    if base_config.get("nframes") is not None: base_config.pop("fps", None)
+                    else: base_config.pop("nframes", None); base_config.setdefault("fps", 2)
+                    ele_segment = {"video": video_path, "video_start": start_t_final, "video_end": end_t_final, **base_config}
+                    clipped_video_frames_tensor = fetch_video(ele_segment, image_factor=base_config.get("image_factor", 28))
+                    if clipped_video_frames_tensor is None or clipped_video_frames_tensor.nelement() == 0: raise ValueError("Video segment processing resulted in empty tensor.")
+
+                    item_data_for_processor = {"question_text": question_text, "clipped_video": clipped_video_frames_tensor, "original_index": idx}
+                    processed_item = prepare_stage2_inputs_for_item(item_data_for_processor, self.processor, self.tokenizer, self.config)
+                    stage2_processed_inputs.append(processed_item)
+                    valid_original_indices_s2.append(idx)
+                except Exception as e:
+                    print(f"[WARN VQA VAL] Error preparing Stage 2 input for item {idx}: {e}. Skipping S2 for this item.")
+
+            # Collate and Generate QA for valid items
+            stage2_gen_output = None
+            decoded_qa_texts_map = {}
+            stage2_gen_batch = None # Define batch variable
+            if stage2_processed_inputs:
+                try:
+                    from verl.utils.dataset.video_rl_dataset_mc import collate_fn
+                    collated_s2_input_dict = collate_fn(stage2_processed_inputs)
+                    stage2_gen_batch = DataProto.from_single_dict(collated_s2_input_dict)
+                    stage2_gen_batch.meta_info = {'eos_token_id': self.tokenizer.eos_token_id, 'pad_token_id': self.tokenizer.pad_token_id, 'do_sample': False, 'validate': True}
+                    print(f"[DEBUG VQA VAL] Generating QA for {len(stage2_gen_batch)} items.")
+                    stage2_gen_output = self.actor_rollout_wg.generate_sequences(stage2_gen_batch)
+
+                    stage2_responses = stage2_gen_output.batch.get('responses')
+                    if stage2_responses is None: raise ValueError("Stage 2 VAL failed (no responses).")
+                    temp_decoded_qa_texts = self.tokenizer.batch_decode(stage2_responses, skip_special_tokens=True)
+                    for i, original_idx in enumerate(valid_original_indices_s2):
+                        if i < len(temp_decoded_qa_texts): decoded_qa_texts_map[original_idx] = temp_decoded_qa_texts[i]
+                except Exception as e:
+                    print(f"[ERROR VQA VAL] Error during Stage 2 validation generation/decoding: {e}."); stage2_gen_output = None
+
+            # --- Assemble DataProto for Reward Function ---
+            val_reward_input_proto = None
+            if stage2_gen_output and valid_original_indices_s2: # Only if S2 succeeded
+                try:
+                    print("[DEBUG VQA VAL] -- Assembling DataProto for val_reward_fn --")
+                    # 1. Get S2 Output Tensors
+                    s2_responses_tensor = stage2_gen_output.batch.get('responses')
+                    s2_attn_mask_full = stage2_gen_output.batch.get('attention_mask')
+                    s2_response_len = s2_responses_tensor.shape[1]
+                    if s2_attn_mask_full is not None and s2_attn_mask_full.shape[1] >= s2_response_len:
+                        s2_response_masks_tensor = s2_attn_mask_full[:, -s2_response_len:]
+                    else:
+                        print("[WARN VQA VAL] Assuming all S2 response tokens valid for reward mask.")
+                        s2_response_masks_tensor = torch.ones_like(s2_responses_tensor)
+
+                    # 2. Gather Non-Tensor Data needed by VQACombinedRewardManager
+                    reward_non_tensor_data = defaultdict(list)
+                    for original_idx in valid_original_indices_s2: # Iterate using the indices that went into S2 gen
+                        reward_non_tensor_data['decoded_grounding_texts'].append(decoded_grounding_texts[original_idx]) # S1 text
+                        reward_non_tensor_data['start_time'].append(full_batch_proto.non_tensor_batch['start_time'][original_idx]) # GT time
+                        reward_non_tensor_data['end_time'].append(full_batch_proto.non_tensor_batch['end_time'][original_idx]) # GT time
+                        reward_non_tensor_data['ground_truth_answer'].append(full_batch_proto.non_tensor_batch['ground_truth_answer'][original_idx]) # GT answer
+                    reward_non_tensor_data_np = {k: np.array(v, dtype=object) for k, v in reward_non_tensor_data.items()}
+
+                    # 3. Create the DataProto object
+                    val_reward_input_proto = DataProto(
+                        batch=TensorDict({
+                            "responses": s2_responses_tensor,
+                            "response_mask": s2_response_masks_tensor,
+                         }, batch_size=[len(valid_original_indices_s2)]), # Batch size matches S2 output
+                        non_tensor_batch=reward_non_tensor_data_np
+                    )
+                    print(f"[DEBUG VQA VAL] Assembled DataProto for reward function. Batch Keys: {list(val_reward_input_proto.batch.keys())}, Non-Tensor Keys: {list(val_reward_input_proto.non_tensor_batch.keys())}")
+
+                except Exception as reward_prep_err:
+                    print(f"[ERROR VQA VAL] Error preparing data for reward function: {reward_prep_err}")
+                    val_reward_input_proto = None
+
+            # --- Call Validation Reward Function ---
+            if val_reward_input_proto:
+                print("[DEBUG VQA VAL] -- Calling self.val_reward_fn --")
+                try:
+                    # self.val_reward_fn is the VQACombinedRewardManager instance
+                    result = self.val_reward_fn(val_reward_input_proto, return_dict=True)
+                    reward_extra_infos_dict = result.get("reward_extra_info", defaultdict(list)) # Get the detailed scores
+                    print("[DEBUG VQA VAL] Received results from val_reward_fn.")
+                    # Optionally save detailed per-item results here if needed
+                    # ... (Logic similar to _validate to save all_vqa_val_results) ...
+
+                except Exception as val_reward_err:
+                    print(f"[ERROR VQA VAL] Error calling val_reward_fn: {val_reward_err}")
+                    reward_extra_infos_dict = defaultdict(list) # Ensure it's empty on error
+            else:
+                 print("[WARN VQA VAL] Skipping reward calculation as Stage 2 failed or produced no input for reward fn.")
+
+
+        # --- Process Aggregated Metrics ---
+        print("[DEBUG VQA VAL] Processing aggregated metrics...")
+        metric_dict = {}
+        vqa_target_metrics = [ # Metrics expected from VQACombinedRewardManager
+             'grounding_accuracy', 'grounding_format', 'grounding_score',
+             'qa_accuracy', 'final_score'
+        ]
+        # Create prefixed versions for processing
+        prefixed_vqa_target_metrics = [f'val_{m}' for m in vqa_target_metrics]
+        prefixed_reward_infos_dict = {f'val_{k}': v for k, v in reward_extra_infos_dict.items()}
+
+        num_results = len(prefixed_reward_infos_dict.get(prefixed_vqa_target_metrics[0], []))
+        dummy_data_sources = np.array(['vqa_val'] * num_results) if num_results > 0 else np.array([])
+        dummy_sample_inputs = [""] * num_results
+
+        if num_results > 0:
+             processed_metrics = process_validation_metrics(
+                  data_sources=dummy_data_sources,
+                  sample_inputs=dummy_sample_inputs,
+                  infos_dict=prefixed_reward_infos_dict, # Use the dict returned by reward fn
+                  target_metrics=prefixed_vqa_target_metrics # Use the prefixed metric names
+             )
+             # Rename keys for final logging (e.g., 'val/vqa/final_score/mean')
+             metric_dict = {k.replace('val/all_sources/val_', 'val/vqa/'): v for k, v in processed_metrics.items()}
+             print(f"[DEBUG VQA VAL] Processed Metrics: {metric_dict}")
+        else:
+             print("[DEBUG VQA VAL] No valid metric results found for processing.")
+
+        print("[DEBUG VQA VAL] Metrics processing complete.")
+        return metric_dict
+    
     def _maybe_log_val_generations(self, inputs, outputs, scores):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""
 
@@ -1335,7 +1565,7 @@ class RayPPOTrainer(object):
         # Initial validation
         if self.val_reward_fn is not None and self.config.trainer.get('val_before_train', True):
              print("--- Performing Initial Validation ---") # Use print
-             val_metrics = self._validate()
+             val_metrics = self._validate_vqa()
              print(f'Initial validation metrics: {val_metrics}') # Use print
              logger_backend.log(data={f"val/{k}": v for k, v in val_metrics.items()}, step=self.global_steps) # Log metrics
              if self.config.trainer.get('val_only', False):
@@ -1381,6 +1611,8 @@ class RayPPOTrainer(object):
                         print(f"  GT Answer (first): {full_batch_proto.non_tensor_batch['ground_truth_answer'][0]}")
                     if 'start_time' in full_batch_proto.non_tensor_batch:
                          print(f"  GT Start Times (first 5): {full_batch_proto.non_tensor_batch['start_time'][:5]}")
+                    if 'end_time' in full_batch_proto.non_tensor_batch:
+                         print(f"  GT End Times (first 5): {full_batch_proto.non_tensor_batch['end_time'][:5]}")
                     # --- END DEBUG ---
 
                 except Exception as e:
@@ -1388,296 +1620,294 @@ class RayPPOTrainer(object):
                     print(f"{step_info_prefix} [ERROR] Error creating DataProto: {e}. Skipping step.")
                     import traceback; traceback.print_exc(); continue
 
-                # --- Stage 1: Grounding Generation ---
-                print(f"{step_info_prefix} -- Stage 1: Generating Grounding --") # Use print
-                stage1_gen_output = None
-                decoded_grounding_texts = ["<S1 Generation Failed>"] * current_batch_size
-                predicted_times = [(None, None)] * current_batch_size
-                try:
-                    with _timer('S1_Gen', timing_raw):
-                        stage1_batch_keys = ['input_ids', 'attention_mask', 'position_ids']
-                        stage1_non_tensor_keys = ['multi_modal_inputs']
-                        actual_s1_batch_keys = [k for k in stage1_batch_keys if k in full_batch_proto.batch]
-                        actual_s1_non_tensor_keys = [k for k in stage1_non_tensor_keys if k in full_batch_proto.non_tensor_batch]
-                        if not actual_s1_batch_keys: raise ValueError("Missing essential Stage 1 tensor keys.")
-
-                        stage1_gen_batch = DataProto(
-                           batch=full_batch_proto.batch.select(*actual_s1_batch_keys),
-                           non_tensor_batch={k: full_batch_proto.non_tensor_batch[k] for k in actual_s1_non_tensor_keys}
-                        )
-                        stage1_gen_batch.meta_info = {'eos_token_id': self.tokenizer.eos_token_id, 'pad_token_id': self.tokenizer.pad_token_id}
-                        print(f"{step_info_prefix} [DEBUG S1 Gen Input] Batch Keys: {list(stage1_gen_batch.batch.keys())}, Non-Tensor Keys: {list(stage1_gen_batch.non_tensor_batch.keys())}")
-                        stage1_gen_output = self.actor_rollout_wg.generate_sequences(stage1_gen_batch)
-
-                    with _timer('S1_DecodeParse', timing_raw):
-                        stage1_responses = stage1_gen_output.batch.get('responses')
-                        if stage1_responses is None: raise ValueError("Stage 1 generation failed (no responses tensor).")
-                        print(f"{step_info_prefix} [DEBUG S1 Gen Output] Responses Shape: {stage1_responses.shape}")
-                        decoded_grounding_texts = self.tokenizer.batch_decode(stage1_responses, skip_special_tokens=True)
-                        predicted_times = parse_grounding_times(decoded_grounding_texts) # Assume this prints details
-                        print(f"{step_info_prefix} [INFO] S1 Decoded & Parsed.") # Use print
-
-                except Exception as e:
-                    print(f"{step_info_prefix} [ERROR] Error during Stage 1: {e}. Skipping step.") # Use print
-                    import traceback; traceback.print_exc(); progress_bar.update(1); continue
-
-                # --- Stage 2: Prepare Inputs & Generate QA ---
-                print(f"{step_info_prefix} -- Stage 2: Preparing Inputs & Generating QA --") # Use print
-                stage2_processed_inputs = []
-                valid_original_indices = []
-                gt_times_used_for_clip_count = 0
-
-                with _timer('S2_Prep', timing_raw):
-                    for idx in range(current_batch_size):
-                        try:
-                            # ... (S2 Prep: Get data, Determine Clip Times) ...
-                            # 1. Get data for this item
-                            start_t_pred, end_t_pred = predicted_times[idx]
-                            video_path = full_batch_proto.non_tensor_batch["video_path"][idx]
-                            video_config = full_batch_proto.non_tensor_batch["video_processing_config"][idx]
-                            question_text = full_batch_proto.non_tensor_batch["question_text"][idx]
-                            gt_start_time = full_batch_proto.non_tensor_batch['start_time'][idx]
-                            gt_end_time = full_batch_proto.non_tensor_batch['end_time'][idx]
-
-                            # 2. Determine Clip Times (Prefer Prediction, fallback to GT, then Full)
-                            start_t_final, end_t_final = start_t_pred, end_t_pred
-                            used_gt_times = False
-                            if start_t_final is None or end_t_final is None or not isinstance(start_t_final, (int, float)) or \
-                               not isinstance(end_t_final, (int, float)) or start_t_final < 0 or start_t_final >= end_t_final:
-                                start_t_final, end_t_final = gt_start_time, gt_end_time; used_gt_times = True
-                                if start_t_final is None or end_t_final is None or start_t_final < 0 or start_t_final >= end_t_final:
-                                    print(f"{step_info_prefix} [WARN] Item {idx}: Invalid predicted and GT times. Using full video.") # Use print
-                                    start_t_final, end_t_final = 0.0, None; used_gt_times = False
-                                else:
-                                     print(f"{step_info_prefix} [INFO] Item {idx}: Invalid predicted times. Using GT times [{start_t_final}, {end_t_final}].") # Use print
-                                     gt_times_used_for_clip_count += 1
-
-                            # DEBUG S2 Prep
-                            if idx < 2: print(f"{step_info_prefix} [DEBUG S2 Prep] Item {idx}: Clip Times Used: Start={start_t_final}, End={end_t_final}, UsedGT={used_gt_times}")
-
-                            # 3. Prepare `ele` & Fetch Clipped Video
-                            base_config = video_config.copy()
-                            if base_config.get("nframes") is not None: base_config.pop("fps", None)
-                            else: base_config.pop("nframes", None); base_config.setdefault("fps", FPS)
-                            ele_segment = {"video": video_path, "video_start": start_t_final, "video_end": end_t_final, **base_config}
-
-                            clipped_video_frames_tensor = fetch_video(ele_segment, image_factor=base_config.get("image_factor", IMAGE_FACTOR))
-                            if clipped_video_frames_tensor is None or clipped_video_frames_tensor.nelement() == 0:
-                                raise ValueError("Video segment processing resulted in empty tensor.")
-                            if idx < 2: print(f"{step_info_prefix} [DEBUG S2 Prep] Item {idx}: Clipped Video Tensor Shape: {clipped_video_frames_tensor.shape}")
-
-                            # 4. Prepare item data & Process with helper
-                            item_data_for_processor = {
-                                "question_text": question_text, "clipped_video": clipped_video_frames_tensor, "original_index": idx
-                            }
-                            processed_item = prepare_stage2_inputs_for_item(item_data_for_processor, self.processor, self.tokenizer, self.config)
-                            stage2_processed_inputs.append(processed_item)
-                            valid_original_indices.append(idx)
-
-                        except Exception as e:
-                            print(f"{step_info_prefix} [WARN] Error preparing S2 input for item {idx}: {e}. Skipping item.") # Use print, maybe less verbose traceback
-
-                metrics['stage2_prep/gt_times_used_rate'] = gt_times_used_for_clip_count / current_batch_size if current_batch_size > 0 else 0
-                metrics['stage2_prep/valid_item_rate'] = len(valid_original_indices) / current_batch_size if current_batch_size > 0 else 0
-
-                # Collate and Generate QA for valid items
-                stage2_gen_output = None
-                decoded_qa_texts_map = {}
-                stage2_gen_batch = None
-                if stage2_processed_inputs:
+                with _timer('step', timing_raw):
+                    # --- Stage 1: Grounding Generation ---
+                    print(f"{step_info_prefix} -- Stage 1: Generating Grounding --")
+                    # ... (Stage 1 logic with timers and debug prints) ...
+                    stage1_gen_output = None
+                    decoded_grounding_texts = ["<S1 Generation Failed>"] * current_batch_size
+                    predicted_times = [(None, None)] * current_batch_size
                     try:
-                        from verl.utils.dataset.video_rl_dataset_mc import collate_fn
-                        collated_s2_input_dict = collate_fn(stage2_processed_inputs)
-                        stage2_gen_batch = DataProto.from_single_dict(collated_s2_input_dict)
-                        stage2_gen_batch.meta_info = {'eos_token_id': self.tokenizer.eos_token_id, 'pad_token_id': self.tokenizer.pad_token_id}
-                        # --- DEBUG ---
-                        print(f"{step_info_prefix} [DEBUG S2 Gen Input] Collated Batch Shapes:")
-                        for k, v in stage2_gen_batch.batch.items(): print(f"  {k}: {v.shape}")
-                        if 'multi_modal_inputs' in stage2_gen_batch.non_tensor_batch:
-                             # Print shape of pixel_values_videos if it exists
-                             mm_input_first = stage2_gen_batch.non_tensor_batch['multi_modal_inputs'][0]
-                             if isinstance(mm_input_first, dict) and 'pixel_values_videos' in mm_input_first:
-                                 print(f"  Non-Tensor multi_modal_inputs[0]['pixel_values_videos'] Shape: {mm_input_first['pixel_values_videos'].shape}")
-                             else:
-                                 print(f"  Non-Tensor multi_modal_inputs (first): {pformat(mm_input_first)}")
+                        with _timer('S1_Gen', timing_raw):
+                            stage1_batch_keys = ['input_ids', 'attention_mask', 'position_ids']
+                            stage1_non_tensor_keys = ['multi_modal_inputs']
+                            actual_s1_batch_keys = [k for k in stage1_batch_keys if k in full_batch_proto.batch]
+                            actual_s1_non_tensor_keys = [k for k in stage1_non_tensor_keys if k in full_batch_proto.non_tensor_batch]
+                            if not actual_s1_batch_keys: raise ValueError("Missing essential Stage 1 tensor keys.")
 
-                        # --- END DEBUG ---
+                            stage1_gen_batch = DataProto(
+                               batch=full_batch_proto.batch.select(*actual_s1_batch_keys),
+                               non_tensor_batch={k: full_batch_proto.non_tensor_batch[k] for k in actual_s1_non_tensor_keys}
+                            )
+                            stage1_gen_batch.meta_info = {'eos_token_id': self.tokenizer.eos_token_id, 'pad_token_id': self.tokenizer.pad_token_id}
+                            print(f"{step_info_prefix} [DEBUG S1 Gen Input] Batch Keys: {list(stage1_gen_batch.batch.keys())}, Non-Tensor Keys: {list(stage1_gen_batch.non_tensor_batch.keys())}")
+                            stage1_gen_output = self.actor_rollout_wg.generate_sequences(stage1_gen_batch)
 
-                        with _timer('S2_Gen', timing_raw):
-                            print(f"{step_info_prefix} [INFO] Generating QA for {len(stage2_gen_batch)} valid items.") # Use print
-                            stage2_gen_output = self.actor_rollout_wg.generate_sequences(stage2_gen_batch)
-
-                        with _timer('S2_Decode', timing_raw):
-                            stage2_responses = stage2_gen_output.batch.get('responses')
-                            if stage2_responses is None: raise ValueError("Stage 2 generation failed (no responses tensor).")
-                            print(f"{step_info_prefix} [DEBUG S2 Gen Output] Responses Shape: {stage2_responses.shape}")
-                            temp_decoded_qa_texts = self.tokenizer.batch_decode(stage2_responses, skip_special_tokens=True)
-                            for i, original_idx in enumerate(valid_original_indices):
-                                if i < len(temp_decoded_qa_texts):
-                                     decoded_qa_texts_map[original_idx] = temp_decoded_qa_texts[i]
-                                     if i < 5: # Print first 5 valid decoded QA + GT
-                                         gt_ans = full_batch_proto.non_tensor_batch['ground_truth_answer'][original_idx]
-                                         print(f"{step_info_prefix} [DEBUG S2 Decode] Item Original Idx {original_idx}: Decoded='{temp_decoded_qa_texts[i]}', GT='{gt_ans}'")
-                            print(f"{step_info_prefix} [INFO] S2 Decoded QA.") # Use print
+                        with _timer('S1_DecodeParse', timing_raw):
+                            stage1_responses = stage1_gen_output.batch.get('responses')
+                            if stage1_responses is None: raise ValueError("Stage 1 generation failed (no responses tensor).")
+                            print(f"{step_info_prefix} [DEBUG S1 Gen Output] Responses Shape: {stage1_responses.shape}")
+                            decoded_grounding_texts = self.tokenizer.batch_decode(stage1_responses, skip_special_tokens=True)
+                            predicted_times = parse_grounding_times(decoded_grounding_texts) # Assume this prints details
+                            print(f"{step_info_prefix} [INFO] S1 Decoded & Parsed.")
 
                     except Exception as e:
-                        print(f"{step_info_prefix} [ERROR] Error during S2 generation/decoding: {e}.") # Use print
-                        import traceback; traceback.print_exc(); stage2_gen_output = None
+                        print(f"{step_info_prefix} [ERROR] Error during Stage 1: {e}. Skipping step.")
+                        import traceback; traceback.print_exc(); progress_bar.update(1); continue # Continue to next iter
 
-                # --- Assemble PPO Update Batch and Run PPO Steps ---
-                ppo_update_batch = None
-                if stage2_gen_output and valid_original_indices:
-                    try:
-                        print(f"{step_info_prefix} -- Assembling PPO Update Batch --") # Use print
-                        with _timer('PPO_Assemble', timing_raw):
-                            # ... (PPO Assembly logic - remains the same) ...
-                            # 1. Get Stage 2 Output Tensors from stage2_gen_output.batch
-                            s2_responses_tensor = stage2_gen_output.batch.get('responses')
-                            s2_attn_mask_full = stage2_gen_output.batch.get('attention_mask')
-                            s2_response_len = s2_responses_tensor.shape[1]
-                            if s2_attn_mask_full is not None and s2_attn_mask_full.shape[1] >= s2_response_len:
-                                s2_response_masks_tensor = s2_attn_mask_full[:, -s2_response_len:]
+                    # --- Stage 2: Prepare Inputs & Generate QA ---
+                    print(f"{step_info_prefix} -- Stage 2: Preparing Inputs & Generating QA --")
+                    # ... (Stage 2 Prep logic with timers and debug prints) ...
+                    stage2_processed_inputs = []
+                    valid_original_indices = []
+                    gt_times_used_for_clip_count = 0
+                    with _timer('S2_Prep', timing_raw):
+                        for idx in range(current_batch_size):
+                           # ... (try/except block for item prep) ...
+                            try:
+                                # 1. Get data for this item
+                                start_t_pred, end_t_pred = predicted_times[idx]
+                                video_path = full_batch_proto.non_tensor_batch["video_path"][idx]
+                                video_config = full_batch_proto.non_tensor_batch["video_processing_config"][idx]
+                                question_text = full_batch_proto.non_tensor_batch["question_text"][idx]
+                                gt_start_time = full_batch_proto.non_tensor_batch['start_time'][idx]
+                                gt_end_time = full_batch_proto.non_tensor_batch['end_time'][idx]
+
+                                # 2. Determine Clip Times (Prefer Prediction, fallback to GT, then Full)
+                                start_t_final, end_t_final = start_t_pred, end_t_pred
+                                used_gt_times = False
+                                if start_t_final is None or end_t_final is None or not isinstance(start_t_final, (int, float)) or \
+                                   not isinstance(end_t_final, (int, float)) or start_t_final < 0 or start_t_final >= end_t_final:
+                                    start_t_final, end_t_final = gt_start_time, gt_end_time; used_gt_times = True
+                                    if start_t_final is None or end_t_final is None or start_t_final < 0 or start_t_final >= end_t_final:
+                                        print(f"{step_info_prefix} [WARN] Item {idx}: Invalid predicted and GT times. Using full video.")
+                                        start_t_final, end_t_final = 0.0, None; used_gt_times = False
+                                    else:
+                                         print(f"{step_info_prefix} [INFO] Item {idx}: Invalid predicted times. Using GT times [{start_t_final}, {end_t_final}].")
+                                         gt_times_used_for_clip_count += 1
+
+                                # DEBUG S2 Prep
+                                if idx < 2: print(f"{step_info_prefix} [DEBUG S2 Prep] Item {idx}: Clip Times Used: Start={start_t_final}, End={end_t_final}, UsedGT={used_gt_times}")
+
+                                # 3. Prepare `ele` & Fetch Clipped Video
+                                base_config = video_config.copy()
+                                if base_config.get("nframes") is not None: base_config.pop("fps", None)
+                                else: base_config.pop("nframes", None); base_config.setdefault("fps", 2)
+                                ele_segment = {"video": video_path, "video_start": start_t_final, "video_end": end_t_final, **base_config}
+
+                                clipped_video_frames_tensor = fetch_video(ele_segment, image_factor=base_config.get("image_factor", 28))
+                                if clipped_video_frames_tensor is None or clipped_video_frames_tensor.nelement() == 0:
+                                    raise ValueError("Video segment processing resulted in empty tensor.")
+                                if idx < 2: print(f"{step_info_prefix} [DEBUG S2 Prep] Item {idx}: Clipped Video Tensor Shape: {clipped_video_frames_tensor.shape}")
+
+                                # 4. Prepare item data & Process with helper
+                                item_data_for_processor = {
+                                    "question_text": question_text, "clipped_video": clipped_video_frames_tensor, "original_index": idx
+                                }
+                                processed_item = prepare_stage2_inputs_for_item(item_data_for_processor, self.processor, self.tokenizer, self.config)
+                                stage2_processed_inputs.append(processed_item)
+                                valid_original_indices.append(idx)
+
+                            except Exception as e:
+                                print(f"{step_info_prefix} [WARN] Error preparing S2 input for item {idx}: {e}. Skipping item.")
+
+                    metrics['stage2_prep/gt_times_used_rate'] = gt_times_used_for_clip_count / current_batch_size if current_batch_size > 0 else 0
+                    metrics['stage2_prep/valid_item_rate'] = len(valid_original_indices) / current_batch_size if current_batch_size > 0 else 0
+
+                    # Collate and Generate QA
+                    # ... (Stage 2 Gen logic with timers and debug prints) ...
+                    stage2_gen_output = None
+                    decoded_qa_texts_map = {}
+                    stage2_gen_batch = None
+                    if stage2_processed_inputs:
+                        try:
+                            from verl.utils.dataset.video_rl_dataset_mc import collate_fn
+                            collated_s2_input_dict = collate_fn(stage2_processed_inputs)
+                            stage2_gen_batch = DataProto.from_single_dict(collated_s2_input_dict)
+                            stage2_gen_batch.meta_info = {'eos_token_id': self.tokenizer.eos_token_id, 'pad_token_id': self.tokenizer.pad_token_id}
+                            print(f"{step_info_prefix} [DEBUG S2 Gen Input] Collated Batch Shapes:")
+                            for k, v in stage2_gen_batch.batch.items(): print(f"  {k}: {v.shape}")
+                            if 'multi_modal_inputs' in stage2_gen_batch.non_tensor_batch:
+                                mm_input_first = stage2_gen_batch.non_tensor_batch['multi_modal_inputs'][0]
+                                print(f"  Non-Tensor Keys include 'multi_modal_inputs'.")
+                                if isinstance(mm_input_first, dict) and 'pixel_values_videos' in mm_input_first:
+                                    print(f"    multi_modal_inputs[0]['pixel_values_videos'] Shape: {mm_input_first['pixel_values_videos'].shape}")
+                                else:
+                                    try: print(f"    multi_modal_inputs (first item content): {pformat(mm_input_first)}")
+                                    except Exception as pformat_err: print(f"    multi_modal_inputs (first item content): <Error formatting: {pformat_err}>")
+                            else: print(f"  Non-Tensor Keys do NOT include 'multi_modal_inputs'.")
+
+                            with _timer('S2_Gen', timing_raw):
+                                print(f"{step_info_prefix} [INFO] Generating QA for {len(stage2_gen_batch)} valid items.")
+                                stage2_gen_output = self.actor_rollout_wg.generate_sequences(stage2_gen_batch)
+
+                            with _timer('S2_Decode', timing_raw):
+                                stage2_responses = stage2_gen_output.batch.get('responses')
+                                if stage2_responses is None: raise ValueError("Stage 2 generation failed (no responses tensor).")
+                                print(f"{step_info_prefix} [DEBUG S2 Gen Output] Responses Shape: {stage2_responses.shape}")
+                                temp_decoded_qa_texts = self.tokenizer.batch_decode(stage2_responses, skip_special_tokens=True)
+                                for i, original_idx in enumerate(valid_original_indices):
+                                    if i < len(temp_decoded_qa_texts):
+                                         decoded_qa_texts_map[original_idx] = temp_decoded_qa_texts[i]
+                                         if i < 5:
+                                             gt_ans = full_batch_proto.non_tensor_batch['ground_truth_answer'][original_idx]
+                                             print(f"{step_info_prefix} [DEBUG S2 Decode] Item Original Idx {original_idx}: Decoded='{temp_decoded_qa_texts[i]}', GT='{gt_ans}'")
+                                print(f"{step_info_prefix} [INFO] S2 Decoded QA.")
+
+                        except Exception as e:
+                            print(f"{step_info_prefix} [ERROR] Error during S2 generation/decoding: {e}.")
+                            import traceback; traceback.print_exc(); stage2_gen_output = None
+
+
+                    # --- Assemble PPO Update Batch and Run PPO Steps ---
+                    ppo_update_batch = None
+                    if stage2_gen_output and valid_original_indices:
+                        try:
+                            print(f"{step_info_prefix} -- Assembling PPO Update Batch --")
+                            with _timer('PPO_Assemble', timing_raw):
+                                # ... (PPO Assembly logic with debug prints) ...
+                                # 1. Get S2 Output Tensors
+                                s2_responses_tensor = stage2_gen_output.batch.get('responses')
+                                s2_attn_mask_full = stage2_gen_output.batch.get('attention_mask')
+                                s2_response_len = s2_responses_tensor.shape[1]
+                                if s2_attn_mask_full is not None and s2_attn_mask_full.shape[1] >= s2_response_len:
+                                    s2_response_masks_tensor = s2_attn_mask_full[:, -s2_response_len:]
+                                else:
+                                    print(f"{step_info_prefix} [WARN] Assuming all S2 response tokens valid due to missing/short attention mask.")
+                                    s2_response_masks_tensor = torch.ones_like(s2_responses_tensor)
+
+                                # 2. Get S2 Input Tensors
+                                collated_s2_inputs_batch = stage2_gen_batch.batch
+
+                                # 3. Gather Non-Tensor Data for Reward
+                                reward_non_tensor_data = defaultdict(list)
+                                for original_idx in valid_original_indices:
+                                    reward_non_tensor_data['decoded_grounding_texts'].append(decoded_grounding_texts[original_idx])
+                                    reward_non_tensor_data['start_time'].append(full_batch_proto.non_tensor_batch['start_time'][original_idx])
+                                    reward_non_tensor_data['end_time'].append(full_batch_proto.non_tensor_batch['end_time'][original_idx])
+                                    reward_non_tensor_data['ground_truth_answer'].append(full_batch_proto.non_tensor_batch['ground_truth_answer'][original_idx])
+                                reward_non_tensor_data_np = {k: np.array(v, dtype=object) for k, v in reward_non_tensor_data.items()}
+                                original_uids = full_batch_proto.non_tensor_batch.get('uid')
+                                if original_uids is None: original_uids = np.array([str(uuid.uuid4()) for _ in range(current_batch_size)], dtype=object)
+                                valid_uids = [original_uids[idx] for idx in valid_original_indices]
+                                reward_non_tensor_data_np['uid'] = np.array(valid_uids, dtype=object)
+
+                                # 4. Create PPO Batch Dictionary
+                                ppo_batch_dict = {
+                                    "input_ids": collated_s2_inputs_batch['input_ids'],
+                                    "attention_mask": collated_s2_inputs_batch['attention_mask'],
+                                    "position_ids": collated_s2_inputs_batch['position_ids'],
+                                    "responses": s2_responses_tensor,
+                                    "response_mask": s2_response_masks_tensor,
+                                    **({'multi_modal_inputs': collated_s2_inputs_batch['multi_modal_inputs']}
+                                       if 'multi_modal_inputs' in collated_s2_inputs_batch else {})
+                                }
+
+                                # 5. Create PPO DataProto
+                                ppo_update_batch = DataProto(
+                                    batch=TensorDict(ppo_batch_dict, batch_size=[len(valid_uids)]),
+                                    non_tensor_batch=reward_non_tensor_data_np
+                                )
+                                print(f"{step_info_prefix} [DEBUG PPO Batch] Assembled Batch Shapes:")
+                                for k, v in ppo_update_batch.batch.items(): print(f"  {k}: {v.shape}")
+                                print(f"  Non-Tensor Keys: {list(ppo_update_batch.non_tensor_batch.keys())}")
+
+                        except Exception as ppo_prep_err:
+                            print(f"{step_info_prefix} [ERROR] Error assembling PPO update batch: {ppo_prep_err}")
+                            import traceback; traceback.print_exc(); ppo_update_batch = None
+
+                    # --- PPO Update Steps ---
+                    if ppo_update_batch:
+                        print(f"{step_info_prefix} -- Performing PPO Updates --")
+                        try:
+                            # === Explicit Reward Calculation ===
+                            with _timer('PPO_Reward', timing_raw):
+                                reward_result = self.reward_fn(ppo_update_batch, return_dict=True)
+                                reward_tensor = reward_result['reward_tensor']
+                                reward_extra_infos_dict = reward_result.get('reward_extra_info', {})
+                            ppo_update_batch.batch['token_level_scores'] = reward_tensor
+                            ppo_update_batch.non_tensor_batch.update(reward_extra_infos_dict)
+                            print(f"{step_info_prefix} [DEBUG PPO Reward] Reward Tensor Shape: {reward_tensor.shape}, Non-zero rewards: {torch.count_nonzero(reward_tensor)}")
+                            print(f"{step_info_prefix} [DEBUG PPO Reward] Extra Info (first item):")
+                            if len(valid_original_indices) > 0:
+                                first_item_rewards = {k: v[0] for k, v in reward_extra_infos_dict.items() if hasattr(v, '__len__') and len(v) > 0}
+                                print(pformat(first_item_rewards))
+                            # ==================================
+
+                            # Compute Log Probs (Actor and Ref)
+                            with _timer('PPO_old_log_prob', timing_raw):
+                                old_log_prob_output = self.actor_rollout_wg.compute_log_prob(ppo_update_batch)
+                            ppo_update_batch = ppo_update_batch.union(old_log_prob_output)
+                            print(f"{step_info_prefix} [DEBUG PPO Logprob] old_log_probs shape: {ppo_update_batch.batch['old_log_probs'].shape}")
+
+                            if self.use_reference_policy:
+                                with _timer('PPO_ref_log_prob', timing_raw):
+                                    ref_log_prob_output = self.ref_policy_wg.compute_ref_log_prob(ppo_update_batch)
+                                ppo_update_batch = ppo_update_batch.union(ref_log_prob_output)
+                                print(f"{step_info_prefix} [DEBUG PPO Logprob] ref_log_prob shape: {ppo_update_batch.batch['ref_log_prob'].shape}")
+
+
+                            # Compute Values (Critic)
+                            if self.use_critic:
+                                with _timer('PPO_values', timing_raw):
+                                    values_output = self.critic_wg.compute_values(ppo_update_batch)
+                                ppo_update_batch = ppo_update_batch.union(values_output)
+                                print(f"{step_info_prefix} [DEBUG PPO Values] values shape: {ppo_update_batch.batch['values'].shape}")
+
+
+                            # Apply KL Penalty
+                            with _timer('PPO_KL', timing_raw):
+                                if self.config.algorithm.use_kl_in_reward:
+                                    ppo_update_batch, kl_metrics = apply_kl_penalty(ppo_update_batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty)
+                                    metrics.update(kl_metrics)
+                                    print(f"{step_info_prefix} [DEBUG PPO KL] Applied KL penalty. Metrics: {kl_metrics}")
+                                else:
+                                    ppo_update_batch.batch['token_level_rewards'] = ppo_update_batch.batch['token_level_scores']
+                                print(f"{step_info_prefix} [DEBUG PPO KL] token_level_rewards shape: {ppo_update_batch.batch['token_level_rewards'].shape}")
+
+
+                            # Compute Advantage
+                            with _timer('PPO_Adv', timing_raw):
+                                if self.config.trainer.balance_batch:
+                                    self._balance_batch(ppo_update_batch, metrics=metrics, logging_prefix='ppo_seqlen')
+                                ppo_update_batch.meta_info['global_token_num'] = torch.sum(ppo_update_batch.batch['attention_mask'], dim=-1).tolist()
+
+                                ppo_update_batch = compute_advantage(
+                                    ppo_update_batch, adv_estimator=self.config.algorithm.adv_estimator,
+                                    gamma=self.config.algorithm.gamma, lam=self.config.algorithm.lam,
+                                )
+                                print(f"{step_info_prefix} [DEBUG PPO Advantage] advantages shape: {ppo_update_batch.batch['advantages'].shape}, returns shape: {ppo_update_batch.batch['returns'].shape}")
+
+
+                            # Update Critic
+                            if self.use_critic:
+                                with _timer('PPO_update_critic', timing_raw):
+                                    critic_output = self.critic_wg.update_critic(ppo_update_batch)
+                                critic_output_metrics = reduce_metrics({f"critic/{k}": v for k, v in critic_output.meta_info['metrics'].items()})
+                                metrics.update(critic_output_metrics)
+                                print(f"{step_info_prefix} [DEBUG PPO Update] Critic metrics: {critic_output_metrics}")
+
+                            # Update Actor
+                            if self.config.trainer.critic_warmup <= self.global_steps:
+                                with _timer('PPO_update_actor', timing_raw):
+                                    actor_output = self.actor_rollout_wg.update_actor(ppo_update_batch)
+                                actor_output_metrics = reduce_metrics({f"actor/{k}": v for k, v in actor_output.meta_info['metrics'].items()})
+                                metrics.update(actor_output_metrics)
+                                print(f"{step_info_prefix} [DEBUG PPO Update] Actor metrics: {actor_output_metrics}")
                             else:
-                                print(f"{step_info_prefix} [WARN] Assuming all S2 response tokens valid due to missing/short attention mask.") # Use print
-                                s2_response_masks_tensor = torch.ones_like(s2_responses_tensor)
+                                print(f"{step_info_prefix} Skipping actor update (Critic warmup)")
 
-                            # 2. Get Stage 2 Input Tensors (already collated in stage2_gen_batch)
-                            collated_s2_inputs_batch = stage2_gen_batch.batch
-
-                            # 3. Gather Non-Tensor Data for Reward Function for the valid items
-                            reward_non_tensor_data = defaultdict(list)
-                            for original_idx in valid_original_indices: # Iterate using the index list
-                                reward_non_tensor_data['decoded_grounding_texts'].append(decoded_grounding_texts[original_idx])
-                                reward_non_tensor_data['start_time'].append(full_batch_proto.non_tensor_batch['start_time'][original_idx])
-                                reward_non_tensor_data['end_time'].append(full_batch_proto.non_tensor_batch['end_time'][original_idx])
-                                reward_non_tensor_data['ground_truth_answer'].append(full_batch_proto.non_tensor_batch['ground_truth_answer'][original_idx])
-                            reward_non_tensor_data_np = {k: np.array(v, dtype=object) for k, v in reward_non_tensor_data.items()}
-
-                            # Add UIDs
-                            original_uids = full_batch_proto.non_tensor_batch.get('uid')
-                            if original_uids is None: original_uids = np.array([str(uuid.uuid4()) for _ in range(current_batch_size)], dtype=object)
-                            valid_uids = [original_uids[idx] for idx in valid_original_indices]
-                            reward_non_tensor_data_np['uid'] = np.array(valid_uids, dtype=object)
-
-                            # 4. Create the PPO Batch Dictionary (Tensor part)
-                            ppo_batch_dict = {
-                                "input_ids": collated_s2_inputs_batch['input_ids'],
-                                "attention_mask": collated_s2_inputs_batch['attention_mask'], # S2 Input attention mask
-                                "position_ids": collated_s2_inputs_batch['position_ids'],
-                                "responses": s2_responses_tensor,        # S2 Output tensor
-                                "response_mask": s2_response_masks_tensor, # S2 Output mask
-                                **({'multi_modal_inputs': collated_s2_inputs_batch['multi_modal_inputs']}
-                                   if 'multi_modal_inputs' in collated_s2_inputs_batch else {})
-                            }
-
-                            # 5. Create the initial PPO DataProto
-                            ppo_update_batch = DataProto(
-                                batch=TensorDict(ppo_batch_dict, batch_size=[len(valid_uids)]),
-                                non_tensor_batch=reward_non_tensor_data_np
-                            )
-                            # --- DEBUG ---
-                            print(f"{step_info_prefix} [DEBUG PPO Batch] Assembled Batch Shapes:")
-                            for k, v in ppo_update_batch.batch.items(): print(f"  {k}: {v.shape}")
-                            print(f"  Non-Tensor Keys: {list(ppo_update_batch.non_tensor_batch.keys())}")
-                            # --- END DEBUG ---
-
-                    except Exception as ppo_prep_err:
-                        print(f"{step_info_prefix} [ERROR] Error assembling PPO update batch: {ppo_prep_err}") # Use print
-                        import traceback; traceback.print_exc(); ppo_update_batch = None
-
-                # --- PPO Update Steps ---
-                if ppo_update_batch:
-                    print(f"{step_info_prefix} -- Performing PPO Updates --") # Use print
-                    try:
-                        # === Explicit Reward Calculation ===
-                        with _timer('PPO_Reward', timing_raw):
-                            reward_result = self.reward_fn(ppo_update_batch, return_dict=True)
-                            reward_tensor = reward_result['reward_tensor']
-                            reward_extra_infos_dict = reward_result.get('reward_extra_info', {})
-                        ppo_update_batch.batch['token_level_scores'] = reward_tensor
-                        ppo_update_batch.non_tensor_batch.update(reward_extra_infos_dict)
-                        # --- DEBUG ---
-                        print(f"{step_info_prefix} [DEBUG PPO Reward] Reward Tensor Shape: {reward_tensor.shape}, Non-zero rewards: {torch.count_nonzero(reward_tensor)}")
-                        print(f"{step_info_prefix} [DEBUG PPO Reward] Extra Info (first item):")
-                        if len(valid_original_indices) > 0:
-                            first_item_rewards = {k: v[0] for k, v in reward_extra_infos_dict.items() if hasattr(v, '__len__') and len(v) > 0}
-                            print(pformat(first_item_rewards))
-                        # --- END DEBUG ---
-                        # ==================================
-
-                        # ... (PPO Steps: Log Probs, Values, KL, Advantage, Updates - logic remains the same) ...
-                         # Compute Log Probs (Actor and Ref)
-                        with _timer('PPO_old_log_prob', timing_raw):
-                            old_log_prob_output = self.actor_rollout_wg.compute_log_prob(ppo_update_batch)
-                        ppo_update_batch = ppo_update_batch.union(old_log_prob_output)
-                        print(f"{step_info_prefix} [DEBUG PPO Logprob] old_log_probs shape: {ppo_update_batch.batch['old_log_probs'].shape}")
-
-                        if self.use_reference_policy:
-                            with _timer('PPO_ref_log_prob', timing_raw):
-                                ref_log_prob_output = self.ref_policy_wg.compute_ref_log_prob(ppo_update_batch)
-                            ppo_update_batch = ppo_update_batch.union(ref_log_prob_output)
-                            print(f"{step_info_prefix} [DEBUG PPO Logprob] ref_log_prob shape: {ppo_update_batch.batch['ref_log_prob'].shape}")
-
-
-                        # Compute Values (Critic)
-                        if self.use_critic:
-                            with _timer('PPO_values', timing_raw):
-                                values_output = self.critic_wg.compute_values(ppo_update_batch)
-                            ppo_update_batch = ppo_update_batch.union(values_output)
-                            print(f"{step_info_prefix} [DEBUG PPO Values] values shape: {ppo_update_batch.batch['values'].shape}")
-
-
-                        # Apply KL Penalty
-                        with _timer('PPO_KL', timing_raw):
-                            if self.config.algorithm.use_kl_in_reward:
-                                ppo_update_batch, kl_metrics = apply_kl_penalty(ppo_update_batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty)
-                                metrics.update(kl_metrics)
-                                print(f"{step_info_prefix} [DEBUG PPO KL] Applied KL penalty. Metrics: {kl_metrics}")
-                            else:
-                                ppo_update_batch.batch['token_level_rewards'] = ppo_update_batch.batch['token_level_scores']
-                            print(f"{step_info_prefix} [DEBUG PPO KL] token_level_rewards shape: {ppo_update_batch.batch['token_level_rewards'].shape}")
-
-
-                        # Compute Advantage
-                        with _timer('PPO_Adv', timing_raw):
-                            if self.config.trainer.balance_batch:
-                                self._balance_batch(ppo_update_batch, metrics=metrics, logging_prefix='ppo_seqlen')
-                            ppo_update_batch.meta_info['global_token_num'] = torch.sum(ppo_update_batch.batch['attention_mask'], dim=-1).tolist()
-
-                            ppo_update_batch = compute_advantage(
-                                ppo_update_batch, adv_estimator=self.config.algorithm.adv_estimator,
-                                gamma=self.config.algorithm.gamma, lam=self.config.algorithm.lam,
-                            )
-                            print(f"{step_info_prefix} [DEBUG PPO Advantage] advantages shape: {ppo_update_batch.batch['advantages'].shape}, returns shape: {ppo_update_batch.batch['returns'].shape}")
-
-
-                        # Update Critic
-                        if self.use_critic:
-                            with _timer('PPO_update_critic', timing_raw):
-                                critic_output = self.critic_wg.update_critic(ppo_update_batch)
-                            critic_output_metrics = reduce_metrics({f"critic/{k}": v for k, v in critic_output.meta_info['metrics'].items()})
-                            metrics.update(critic_output_metrics)
-                            print(f"{step_info_prefix} [DEBUG PPO Update] Critic metrics: {critic_output_metrics}")
-
-                        # Update Actor
-                        if self.config.trainer.critic_warmup <= self.global_steps:
-                            with _timer('PPO_update_actor', timing_raw):
-                                actor_output = self.actor_rollout_wg.update_actor(ppo_update_batch)
-                            actor_output_metrics = reduce_metrics({f"actor/{k}": v for k, v in actor_output.meta_info['metrics'].items()})
-                            metrics.update(actor_output_metrics)
-                            print(f"{step_info_prefix} [DEBUG PPO Update] Actor metrics: {actor_output_metrics}")
-                        else:
-                            print(f"{step_info_prefix} Skipping actor update (Critic warmup)") # Use print
-
-                    except Exception as ppo_update_err:
-                        print(f"{step_info_prefix} [ERROR] Error during PPO update steps: {ppo_update_err}") # Use print
-                        import traceback; traceback.print_exc()
-                else:
-                    print(f"{step_info_prefix} [WARN] Skipping PPO updates as no valid batch was prepared or S2 failed.") # Use print
+                        except Exception as ppo_update_err:
+                            print(f"{step_info_prefix} [ERROR] Error during PPO update steps: {ppo_update_err}")
+                            import traceback; traceback.print_exc()
+                    else:
+                        print(f"{step_info_prefix} [WARN] Skipping PPO updates as no valid batch was prepared or S2 failed.")
+                # ^^^ END OF OVERALL STEP TIMER ^^^
 
                 # --- Logging ---
-                print(f"{step_info_prefix} -- Logging Metrics --") # Use print
+                print(f"{step_info_prefix} -- Logging Metrics --")
                 try:
+                    # ... (logging logic remains the same - using logger_backend.log) ...
                     if ppo_update_batch:
                         metrics.update(compute_data_metrics(batch=ppo_update_batch, use_critic=self.use_critic))
                         metrics.update(compute_timing_metrics(batch=ppo_update_batch, timing_raw=timing_raw))
@@ -1693,31 +1923,37 @@ class RayPPOTrainer(object):
                               else: reward_metrics_to_log[f'reward/{key}_mean'] = 0.0
                     metrics.update(reward_metrics_to_log)
 
-                    metrics['timing/step_total_s'] = sum(timing_raw.values())
-                    # Use logger_backend (Tracking object) for metric logging
-                    logger_backend.log(data=metrics, step=self.global_steps)
-                    print(f"{step_info_prefix} Metrics Logged. Rewards: {reward_metrics_to_log}") # Use print
+                    # Ensure 'step' time exists before calculating total
+                    if 'step' in timing_raw:
+                        metrics['timing/step_total_s'] = timing_raw['step']
+                    else:
+                        # If 'step' timer failed, sum others as fallback (might be inaccurate)
+                         metrics['timing/step_total_s'] = sum(v for k, v in timing_raw.items() if k != 'step')
+                         print(f"{step_info_prefix} [WARN] Overall 'step' timer key missing. Total time might be inaccurate.")
+
+                    logger_backend.log(data=metrics, step=self.global_steps) # Use Tracking object
+                    print(f"{step_info_prefix} Metrics Logged. Rewards: {reward_metrics_to_log}")
                 except Exception as log_err:
-                    print(f"{step_info_prefix} [ERROR] Error during logging: {log_err}") # Use print
+                    print(f"{step_info_prefix} [ERROR] Error during logging: {log_err}")
                     import traceback; traceback.print_exc()
 
 
                 # --- Validate ---
                 is_last_step = self.global_steps >= self.total_training_steps
-                last_val_metrics = None # Define here for scope
+                last_val_metrics = None
                 if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and \
                    (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
                    with _timer('testing', timing_raw):
-                       print(f"{step_info_prefix} -- Running Validation --") # Use print
-                       val_metrics: dict = self._validate()
-                       logger_backend.log(data={f"val/{k}": v for k, v in val_metrics.items()}, step=self.global_steps) # Log metrics
-                       print(f"{step_info_prefix} Validation Metrics Logged.") # Use print
+                       print(f"{step_info_prefix} -- Running Validation --")
+                       val_metrics: dict = self._validate_vqa()
+                       logger_backend.log(data={f"val/{k}": v for k, v in val_metrics.items()}, step=self.global_steps) # Use Tracking object
+                       print(f"{step_info_prefix} Validation Metrics Logged.")
                        if is_last_step: last_val_metrics = val_metrics
 
                 # --- Save Checkpoint ---
                 if self.config.trainer.save_freq > 0 and (is_last_step or \
                         self.global_steps % self.config.trainer.save_freq == 0):
-                    print(f"{step_info_prefix} -- Saving Checkpoint --") # Use print
+                    print(f"{step_info_prefix} -- Saving Checkpoint --")
                     with _timer('save_checkpoint', timing_raw): self._save_checkpoint()
 
                 progress_bar.update(1)
@@ -1725,11 +1961,11 @@ class RayPPOTrainer(object):
 
             # --- End of Batch Loop ---
             if is_last_step:
-                print(f"--- Reached Last Step ({self.global_steps}), Breaking Epoch Loop ---") # Use print
+                print(f"--- Reached Last Step ({self.global_steps}), Breaking Epoch Loop ---")
                 break
 
         progress_bar.close()
-        print("--- Finished VQA Training Loop ---") # Use print
+        print("--- Finished VQA Training Loop ---")
         if 'last_val_metrics' in locals() and last_val_metrics:
              pprint(f'Final validation metrics: {last_val_metrics}')
         
