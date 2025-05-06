@@ -87,7 +87,8 @@ class TaskRunner:
         from omegaconf import OmegaConf
         pprint(OmegaConf.to_container(config, resolve=True))  # resolve=True will eval symbol values
         OmegaConf.resolve(config)
-
+        import torch
+        torch.autograd.set_detect_anomaly(True)
         # download the checkpoint from hdfs
         local_path = copy_to_local(config.actor_rollout_ref.model.path)
 
@@ -209,6 +210,8 @@ class TaskRunner:
                                 ray_worker_group_cls=ray_worker_group_cls,
                                 reward_fn=vqa_reward_fn,
                                 val_reward_fn=vqa_reward_fn)
+        print("DEBUG CONFIG main_vqa: actor ppo_mini_batch_size =", config.actor_rollout_ref.actor.ppo_mini_batch_size)
+
         trainer.init_workers()
         trainer.fit_vqa()
 

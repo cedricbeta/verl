@@ -52,6 +52,13 @@ class DataParallelPPOActor(BasePPOActor):
             torch.compile(verl_F.entropy_from_logits, dynamic=True)
             if self.config.get('use_torch_compile', True)  #  use torch compile by default
             else verl_F.entropy_from_logits)
+        
+        if self.config.ppo_mini_batch_size is None:
+            raise ValueError("ppo_mini_batch_size must be set in the config.")
+        else: 
+            print(f"DEBUG CONFIG Actor Init: self.config.ppo_mini_batch_size = {self.config.ppo_mini_batch_size}")
+        
+
 
     def _forward_micro_batch(self,
                              micro_batch,
@@ -63,11 +70,78 @@ class DataParallelPPOActor(BasePPOActor):
             log_probs: # (bs, response_len)
         """
         response_length = micro_batch['responses'].size(-1)
-        multi_modal_inputs = {}
+        # multi_modal_inputs = {}
+        # if 'multi_modal_inputs' in micro_batch:
+        #     for key in micro_batch['multi_modal_inputs'][0].keys():
+        #         multi_modal_inputs[key] = torch.cat([inputs[key] for inputs in micro_batch['multi_modal_inputs']],
+        #                                             dim=0)
+        multi_modal_inputs_processed = {} # Renamed to avoid confusion
         if 'multi_modal_inputs' in micro_batch:
-            for key in micro_batch['multi_modal_inputs'][0].keys():
-                multi_modal_inputs[key] = torch.cat([inputs[key] for inputs in micro_batch['multi_modal_inputs']],
-                                                    dim=0)
+            mm_inputs_in_micro_batch = micro_batch['multi_modal_inputs']
+            print(f"\nDEBUG ACTOR FORWARD: Type of micro_batch['multi_modal_inputs']: {type(mm_inputs_in_micro_batch)}")
+            if isinstance(mm_inputs_in_micro_batch, list) and len(mm_inputs_in_micro_batch) > 0:
+                print(f"DEBUG ACTOR FORWARD: Length of list: {len(mm_inputs_in_micro_batch)}")
+                first_element = mm_inputs_in_micro_batch[0]
+                print(f"DEBUG ACTOR FORWARD: Type of first element: {type(first_element)}")
+                if isinstance(first_element, dict):
+                    print(f"DEBUG ACTOR FORWARD: Keys in first element dict: {list(first_element.keys())}")
+                    for key, value in first_element.items():
+                        print(f"DEBUG ACTOR FORWARD: Type of value for key '{key}' in first element: {type(value)}")
+                        if isinstance(value, torch.Tensor):
+                            print(f"DEBUG ACTOR FORWARD: Shape of tensor for key '{key}' in first element: {value.shape}")
+                else:
+                    # Print content if not a dict and not too large
+                    try: print(f"DEBUG ACTOR FORWARD: First element content: {str(first_element)[:200]}...")
+                    except: print("DEBUG ACTOR FORWARD: First element content: <Cannot print>")
+            elif isinstance(mm_inputs_in_micro_batch, dict):
+                print(f"DEBUG ACTOR FORWARD: It's a dict! Keys: {list(mm_inputs_in_micro_batch.keys())}")
+                # Print info about the lists inside the dict
+                for key, value_list in mm_inputs_in_micro_batch.items():
+                    print(f"DEBUG ACTOR FORWARD: Key '{key}' contains type: {type(value_list)}")
+                    if isinstance(value_list, list) and len(value_list) > 0:
+                        print(f"DEBUG ACTOR FORWARD:   List length: {len(value_list)}, Type of first item: {type(value_list[0])}")
+                        if isinstance(value_list[0], torch.Tensor):
+                                print(f"DEBUG ACTOR FORWARD:     Tensor shape: {value_list[0].shape}")
+                    elif isinstance(value_list, torch.Tensor):
+                        print(f"DEBUG ACTOR FORWARD:   It's a Tensor! Shape: {value_list.shape}")
+
+            # ----> The problematic loop starts below <----
+            # It expects mm_inputs_in_micro_batch to be a list of dicts [{key: tensor}, ...]
+            try:
+                if isinstance(mm_inputs_in_micro_batch, list) and len(mm_inputs_in_micro_batch) > 0 and isinstance(mm_inputs_in_micro_batch[0], dict):
+                    print("DEBUG ACTOR FORWARD: Structure appears to be list-of-dicts. Proceeding with torch.cat loop.")
+                    for key in mm_inputs_in_micro_batch[0].keys():
+                        # Check if the items are actually tensors before cat
+                        tensors_to_cat = []
+                        valid_cat = True
+                        for inputs in mm_inputs_in_micro_batch:
+                            item = inputs.get(key)
+                            if isinstance(item, torch.Tensor):
+                                tensors_to_cat.append(item)
+                            else:
+                                print(f"ERROR ACTOR FORWARD: Expected Tensor for key '{key}' but got {type(item)}. Cannot torch.cat.")
+                                valid_cat = False
+                                break # Stop trying to cat this key
+
+                        if valid_cat and tensors_to_cat:
+                            try:
+                                multi_modal_inputs_processed[key] = torch.cat(tensors_to_cat, dim=0)
+                                print(f"DEBUG ACTOR FORWARD: Successfully concatenated key '{key}'. Result shape: {multi_modal_inputs_processed[key].shape}")
+                            except Exception as cat_err:
+                                print(f"ERROR ACTOR FORWARD: torch.cat failed for key '{key}': {cat_err}")
+                        elif not tensors_to_cat and valid_cat:
+                            print(f"WARN ACTOR FORWARD: No tensors found to concatenate for key '{key}'")
+
+                else:
+                    print(f"ERROR ACTOR FORWARD: micro_batch['multi_modal_inputs'] is not the expected list-of-dicts. Skipping processing.")
+
+            except Exception as loop_err:
+                print(f"ERROR ACTOR FORWARD: Error during mm_inputs processing loop: {loop_err}")
+                import traceback; traceback.print_exc()
+
+        # Make sure multi_modal_inputs used later is the processed one
+        multi_modal_inputs_arg = multi_modal_inputs_processed
+        
 
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
             input_ids = micro_batch['input_ids']
@@ -109,7 +183,7 @@ class DataParallelPPOActor(BasePPOActor):
                 output = self.actor_module(input_ids=input_ids_rmpad,
                                            attention_mask=None,
                                            position_ids=position_ids_rmpad,
-                                           **multi_modal_inputs,
+                                           **multi_modal_inputs_arg,
                                            use_cache=False)  # prevent model thinks we are generating
                 logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
 
@@ -156,7 +230,7 @@ class DataParallelPPOActor(BasePPOActor):
                 output = self.actor_module(input_ids=input_ids,
                                            attention_mask=attention_mask,
                                            position_ids=position_ids,
-                                           **multi_modal_inputs,
+                                           **multi_modal_inputs_arg,
                                            use_cache=False)  # prevent model thinks we are generating
                 logits = output.logits
                 logits.div_(temperature)
@@ -164,6 +238,7 @@ class DataParallelPPOActor(BasePPOActor):
                 log_probs = logprobs_from_logits(logits, micro_batch['responses'])
                 if calculate_entropy:
                     entropy = verl_F.entropy_from_logits(logits)  # (bsz, response_length)
+                    
 
             return entropy, log_probs
 
@@ -211,6 +286,16 @@ class DataParallelPPOActor(BasePPOActor):
         select_keys = ['responses', 'input_ids', 'attention_mask', 'position_ids']
         batch = data.select(batch_keys=select_keys).batch
         has_multi_modal_inputs = 'multi_modal_inputs' in data.non_tensor_batch.keys()
+    
+        
+        print(f"DEBUG DP_ACTOR (compute_log_prob): data.batch.batch_size[0] = {data.batch.batch_size[0]}")
+        print(f"DEBUG DP_ACTOR (compute_log_prob): micro_batch_size from meta_info = {data.meta_info.get('micro_batch_size')}")
+        # If not using dynamic_bsz, num_micro_batches is calculated before chunking
+        if not use_dynamic_bsz and micro_batch_size > 0 : # Add check for micro_batch_size > 0
+            num_micro_batches = data.batch.batch_size[0] // micro_batch_size
+            print(f"DEBUG DP_ACTOR (compute_log_prob): Calculated num_micro_batches = {num_micro_batches}")
+        elif not use_dynamic_bsz and micro_batch_size == 0:
+            print(f"ERROR DP_ACTOR (compute_log_prob): micro_batch_size is 0, will cause ZeroDivisionError!")
 
         if has_multi_modal_inputs:
             num_micro_batches = data.batch.batch_size[0] // micro_batch_size
@@ -254,6 +339,7 @@ class DataParallelPPOActor(BasePPOActor):
         # make sure we are in training mode
         self.actor_module.train()
 
+
         temperature = data.meta_info['temperature']  # temperature must be in the data.meta_info to avoid slient error
 
         select_keys = ['responses', 'input_ids', 'attention_mask', 'position_ids', 'old_log_probs', 'advantages']
@@ -261,6 +347,27 @@ class DataParallelPPOActor(BasePPOActor):
             select_keys.append('ref_log_prob')
         batch = data.select(batch_keys=select_keys).batch
         has_multi_modal_inputs = 'multi_modal_inputs' in data.non_tensor_batch.keys()
+        
+        current_mini_batch_size = 0
+        if isinstance(data, DataProto): # 'data' here is a mini_batch
+            current_mini_batch_size = data.batch.batch_size[0]
+        else: # if data is a TensorDict
+            current_mini_batch_size = data.batch_size[0]
+
+        print(f"DEBUG DP_ACTOR (update_policy): current_mini_batch_size = {current_mini_batch_size}")
+        print(f"DEBUG DP_ACTOR (update_policy): self.config.ppo_micro_batch_size_per_gpu = {self.config.ppo_micro_batch_size_per_gpu}")
+
+        if self.config.ppo_micro_batch_size_per_gpu == 0:
+            print(f"ERROR DP_ACTOR (update_policy): self.config.ppo_micro_batch_size_per_gpu is 0, will cause ZeroDivisionError!")
+        else:
+            # This is for the gradient accumulation calculation
+            grad_accum_calc_num_micro_batches = current_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
+            print(f"DEBUG DP_ACTOR (update_policy): Calculated num_micro_batches for grad_accum = {grad_accum_calc_num_micro_batches}")
+
+        
+        # print data keys
+        # print(f"DEBUG update: data keys: {data.keys()}")
+        # print(f"DEBUG update: data non_tensor_batch keys: {data.non_tensor_batch.keys()}")
 
         # Split to make minibatch iterator for updating the actor
         # See PPO paper for details. https://arxiv.org/abs/1707.06347
@@ -278,6 +385,10 @@ class DataParallelPPOActor(BasePPOActor):
                 mini_batch = data
                 if has_multi_modal_inputs:
                     self.gradient_accumulation = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
+                    print(f"DEBUG scaling: GradAccum - gradient_accumulation = {self.gradient_accumulation}")
+                    print(f"DEBUG scaling: GradAccum - mini_batch_size = {self.config.ppo_mini_batch_size}")
+                    print(f"DEBUG scaling: GradAccum - micro_batch_size = {self.config.ppo_micro_batch_size_per_gpu}")
+                    
                     num_micro_batches = mini_batch.batch.batch_size[0] // self.config.ppo_micro_batch_size_per_gpu
                     micro_batches = data.select(select_keys, non_tensor_select_keys).chunk(num_micro_batches)
                 elif self.config.use_dynamic_bsz:
@@ -296,10 +407,16 @@ class DataParallelPPOActor(BasePPOActor):
                         data = {**data.batch.to(torch.cuda.current_device()), **data.non_tensor_batch}
                     else:
                         data = data.to(torch.cuda.current_device())  # actor device is cpu when using offload
+                    # responses = data['responses']
+                    # response_length = responses.size(1)
+                    # attention_mask = data['attention_mask']
+                    # response_mask = attention_mask[:, -response_length:]
+                    # old_log_prob = data['old_log_probs']
+                    # advantages = data['advantages']
                     responses = data['responses']
-                    response_length = responses.size(1)
-                    attention_mask = data['attention_mask']
-                    response_mask = attention_mask[:, -response_length:]
+                    # response_length = responses.size(1) # No longer needed to slice from input mask
+                    # attention_mask = data['attention_mask'] # No longer used to derive response_mask here
+                    response_mask = data['response_mask'] # <<< USE THE CORRECT MASK
                     old_log_prob = data['old_log_probs']
                     advantages = data['advantages']
 
@@ -351,12 +468,49 @@ class DataParallelPPOActor(BasePPOActor):
                         metrics['actor/kl_loss'] = kl_loss.detach().item()
                         metrics['actor/kl_coef'] = self.config.kl_loss_coef
 
+                    
+                    old_log_prob = data['old_log_probs']
+                    advantages = data['advantages']
+                    print(f"DEBUG update: old_log_prob has NaN/Inf: {torch.isnan(old_log_prob).any().item()}/{torch.isinf(old_log_prob).any().item()}")
+                    print(f"DEBUG update: advantages mean/min/max: {advantages.mean().item()}/{advantages.min().item()}/{advantages.max().item()}")
+                    print(f"DEBUG update: advantages has NaN/Inf: {torch.isnan(advantages).any().item()}/{torch.isinf(advantages).any().item()}")
+                    if self.config.use_kl_loss:
+                        ref_log_prob = data['ref_log_prob']
+                        print(f"DEBUG update: ref_log_prob has NaN/Inf: {torch.isnan(ref_log_prob).any().item()}/{torch.isinf(ref_log_prob).any().item()}")
+
+                    # After calling _forward_micro_batch
+                    print(f"DEBUG update: Current log_prob has NaN/Inf: {torch.isnan(log_prob).any().item()}/{torch.isinf(log_prob).any().item()}")
+                    if calculate_entropy:
+                        print(f"DEBUG update: Current entropy has NaN/Inf: {torch.isnan(entropy).any().item()}/{torch.isinf(entropy).any().item()}")
+
+                    # After calculating pg_loss, kl_loss, entropy_loss
+                    print(f"DEBUG update: pg_loss: {pg_loss.item()}, pg_clipfrac: {pg_clipfrac.item()}, ppo_kl: {ppo_kl.item()}")
+                    if self.config.use_kl_loss:
+                        print(f"DEBUG update: kl_loss: {kl_loss.item()}")
+                    if entropy_coeff != 0:
+                        print(f"DEBUG update: entropy_loss: {entropy_loss.item()}")
+
+                    print(f"DEBUG update: Final policy_loss before backward: {policy_loss.item()}")
+                    if torch.isnan(policy_loss).any() or torch.isinf(policy_loss).any():
+                        print("ERROR: policy_loss is NaN/Inf before backward!")
+                        import pdb; pdb.set_trace() # Optional breakpoint
+                        
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz
                         loss = policy_loss * (len(data) / self.config.ppo_mini_batch_size)
                     else:
-                        loss = policy_loss / self.gradient_accumulation
+                        grad_accum_steps = self.gradient_accumulation
+                        print(f"DEBUG scaling: GradAccum - gradient_accumulation = {grad_accum_steps}")
+                        if grad_accum_steps == 0:
+                            print("ERROR: gradient_accumulation is ZERO!")
+                            # Handle error: maybe skip update or raise an exception
+                            loss = torch.tensor(0.0, device=policy_loss.device, requires_grad=True) # Assign a dummy loss to avoid crash? Or raise error.
+                        else:
+                            loss = policy_loss / grad_accum_steps
+                            
+                    print(f"DEBUG update: Loss before backward: {loss.item()}")
                     loss.backward()
+                    print("DEBUG update: Backward pass completed.")
 
                     data = {
                         'actor/pg_loss': pg_loss.detach().item(),
@@ -365,7 +519,28 @@ class DataParallelPPOActor(BasePPOActor):
                         'actor/pg_clipfrac_lower': pg_clipfrac_lower.detach().item(),
                     }
                     append_to_dict(metrics, data)
+                
+                # ----> ADD GRADIENT CHECK HERE <----
+                found_nan_grad = False
+                # Note: Accessing grads with FSDP might require iterating differently
+                # or using FSDP-specific methods if parameters aren't locally available.
+                # Try this first, it might work depending on FSDP state.
+                for name, param in self.actor_module.named_parameters():
+                    if param.grad is not None:
+                        if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                            print(f"ERROR: Found NaN/Inf gradient in parameter: {name}")
+                            found_nan_grad = True
+                    else:
+                        print(f"DEBUG: Grad is None for parameter: {name}") # Less critical now
 
+                if found_nan_grad:
+                    print("ERROR: NaN/Inf gradients detected immediately after backward pass!")
+                    # import pdb; pdb.set_trace() # Optional breakpoint
+                else:
+                    # This might be printed even if grad_norm becomes NaN later during clipping
+                    print("DEBUG: Gradients seem finite immediately after backward pass.")
+                # ----> END GRADIENT CHECK <----
+                
                 grad_norm = self._optimizer_step()
                 data = {'actor/grad_norm': grad_norm.detach().item()}
             append_to_dict(metrics, data)

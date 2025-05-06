@@ -483,6 +483,8 @@ class RayPPOTrainer(object):
 
         self._validate_config()
         self._create_dataloader()
+        print(f"DEBUG CONFIG Trainer Init Check: self.config.actor_rollout_ref.actor.ppo_mini_batch_size = {self.config.actor_rollout_ref.actor.ppo_mini_batch_size}")
+
 
     def _validate_config(self):
         config = self.config
@@ -1155,6 +1157,9 @@ class RayPPOTrainer(object):
         self.resource_pool_manager.create_resource_pool()
 
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
+        actor_config_for_worker = self.config.actor_rollout_ref.actor # Adjust path if needed
+        print(f"DEBUG CONFIG Trainer -> Actor Worker Init: Config passed to worker: ppo_mini_batch_size = {actor_config_for_worker.ppo_mini_batch_size}")
+
 
         # create actor and rollout
         if self.hybrid_engine:
@@ -1222,6 +1227,8 @@ class RayPPOTrainer(object):
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg['actor_rollout']
         self.actor_rollout_wg.init_model()
+        print("DEBUG CONFIG Trainer Init: actor ppo_mini_batch_size =", self.config.actor_rollout_ref.actor.ppo_mini_batch_size)
+
 
     def _save_checkpoint(self):
         # path: given_path + `/global_step_{global_steps}` + `/actor`
@@ -1691,7 +1698,7 @@ class RayPPOTrainer(object):
 
                                 # 3. Prepare `ele` & Fetch Clipped Video
                                 base_config = video_config.copy()
-                                if base_config.get("nframes") is not None: base_config.pop("fps", None)
+                                if base_config.get("nframes") is not None: base_config.pop("nframe", None)
                                 else: base_config.pop("nframes", None); base_config.setdefault("fps", 2)
                                 ele_segment = {"video": video_path, "video_start": start_t_final, "video_end": end_t_final, **base_config}
 
@@ -1778,6 +1785,16 @@ class RayPPOTrainer(object):
 
                                 # 2. Get S2 Input Tensors
                                 collated_s2_inputs_batch = stage2_gen_batch.batch
+                                collated_s2_non_tensor_batch = stage2_gen_batch.non_tensor_batch # This is a dict
+                                
+                                ppo_batch_dict = {
+                                            "input_ids": collated_s2_inputs_batch['input_ids'],
+                                            "attention_mask": collated_s2_inputs_batch['attention_mask'],
+                                            "position_ids": collated_s2_inputs_batch['position_ids'],
+                                            "responses": s2_responses_tensor,
+                                            "response_mask": s2_response_masks_tensor,
+                                            # --- multi_modal_inputs removed from here ---
+                                        }
 
                                 # 3. Gather Non-Tensor Data for Reward
                                 reward_non_tensor_data = defaultdict(list)
@@ -1791,23 +1808,62 @@ class RayPPOTrainer(object):
                                 if original_uids is None: original_uids = np.array([str(uuid.uuid4()) for _ in range(current_batch_size)], dtype=object)
                                 valid_uids = [original_uids[idx] for idx in valid_original_indices]
                                 reward_non_tensor_data_np['uid'] = np.array(valid_uids, dtype=object)
+                                
+                                 # --- > MODIFICATION: Restructure multi_modal_inputs <---
+                                multi_modal_inputs_for_actor = [] # Initialize as empty list
+                                collated_mm_inputs = None
+                                        # Check both potential locations after collation
+                                if 'multi_modal_inputs' in collated_s2_non_tensor_batch:
+                                    collated_mm_inputs = collated_s2_non_tensor_batch['multi_modal_inputs']
+                                    print(f"{step_info_prefix} [DEBUG PPO Batch] Found 'multi_modal_inputs' in collated non_tensor_batch.")
+                                elif 'multi_modal_inputs' in collated_s2_inputs_batch:
+                                             # This case needs careful handling if mm_inputs are tensors in TensorDict
+                                        print(f"{step_info_prefix} [WARN PPO Batch] Found 'multi_modal_inputs' in collated .batch (TensorDict) - restructuring might be needed.")
+                                             # For now, let's assume it acts like a dictionary for restructuring
+                                        collated_mm_inputs = collated_s2_inputs_batch['multi_modal_inputs'] # This might need .to_dict() or similar
+
+                                if collated_mm_inputs is not None and isinstance(collated_mm_inputs, dict):
+                                            # Assuming collated_mm_inputs is like {'key1': [item1_val, item2_val,...], 'key2': [item1_val, item2_val,...]}
+                                    num_items = len(valid_original_indices) # Should match the length of the lists inside
+                                    mm_keys = list(collated_mm_inputs.keys())
+                                            # Check if lists inside have expected length
+                                    if mm_keys and len(collated_mm_inputs[mm_keys[0]]) == num_items:
+                                                 # Restructure into a list of dicts: [{key1: item1_val, key2: item1_val}, {key1: item2_val, key2: item2_val}, ...]
+                                            multi_modal_inputs_for_actor = [
+                                                {key: collated_mm_inputs[key][i] for key in mm_keys}
+                                                for i in range(num_items)
+                                            ]
+                                            reward_non_tensor_data_np['multi_modal_inputs'] = multi_modal_inputs_for_actor
+                                            print(f"{step_info_prefix} [DEBUG PPO Batch] Restructured and added 'multi_modal_inputs' to non_tensor_batch ({len(multi_modal_inputs_for_actor)} items).")
+                                    else:
+                                            print(f"{step_info_prefix} [WARN PPO Batch] Length mismatch in collated multi_modal_inputs. Cannot restructure. MM inputs might be missing.")
+                                elif collated_mm_inputs is not None:
+                                             # If it's not a dict, maybe it's already the desired list? Unlikely from collate_fn.
+                                        print(f"{step_info_prefix} [WARN PPO Batch] Collated multi_modal_inputs is not a dictionary. Adding as is.")
+                                        reward_non_tensor_data_np['multi_modal_inputs'] = collated_mm_inputs # Add directly, might still cause issues later
+                                else:
+                                        print(f"{step_info_prefix} [DEBUG PPO Batch] 'multi_modal_inputs' not found after S2 collation.")
 
                                 # 4. Create PPO Batch Dictionary
-                                ppo_batch_dict = {
-                                    "input_ids": collated_s2_inputs_batch['input_ids'],
-                                    "attention_mask": collated_s2_inputs_batch['attention_mask'],
-                                    "position_ids": collated_s2_inputs_batch['position_ids'],
-                                    "responses": s2_responses_tensor,
-                                    "response_mask": s2_response_masks_tensor,
-                                    **({'multi_modal_inputs': collated_s2_inputs_batch['multi_modal_inputs']}
-                                       if 'multi_modal_inputs' in collated_s2_inputs_batch else {})
-                                }
+                                # ppo_batch_dict = {
+                                #     "input_ids": collated_s2_inputs_batch['input_ids'],
+                                #     "attention_mask": collated_s2_inputs_batch['attention_mask'],
+                                #     "position_ids": collated_s2_inputs_batch['position_ids'],
+                                #     "responses": s2_responses_tensor,
+                                #     "response_mask": s2_response_masks_tensor,
+                                #     **({'multi_modal_inputs': collated_s2_inputs_batch['multi_modal_inputs']}
+                                #        if 'multi_modal_inputs' in collated_s2_inputs_batch else {})
+                                # }
 
                                 # 5. Create PPO DataProto
+                                # ppo_update_batch = DataProto(
+                                #     batch=TensorDict(ppo_batch_dict, batch_size=[len(valid_uids)]),
+                                #     non_tensor_batch=reward_non_tensor_data_np
+                                # )
                                 ppo_update_batch = DataProto(
-                                    batch=TensorDict(ppo_batch_dict, batch_size=[len(valid_uids)]),
-                                    non_tensor_batch=reward_non_tensor_data_np
-                                )
+                                            batch=TensorDict(ppo_batch_dict, batch_size=[len(valid_uids)]),
+                                            non_tensor_batch=reward_non_tensor_data_np # Now potentially contains mm_inputs
+                                        )
                                 print(f"{step_info_prefix} [DEBUG PPO Batch] Assembled Batch Shapes:")
                                 for k, v in ppo_update_batch.batch.items(): print(f"  {k}: {v.shape}")
                                 print(f"  Non-Tensor Keys: {list(ppo_update_batch.non_tensor_batch.keys())}")
@@ -1820,18 +1876,33 @@ class RayPPOTrainer(object):
                     if ppo_update_batch:
                         print(f"{step_info_prefix} -- Performing PPO Updates --")
                         try:
+                            # # === Explicit Reward Calculation ===
+                            # with _timer('PPO_Reward', timing_raw):
+                            #     reward_result = self.reward_fn(ppo_update_batch, return_dict=True)
+                            #     reward_tensor = reward_result['reward_tensor']
+                            #     reward_extra_infos_dict = reward_result.get('reward_extra_info', {})
+                            # ppo_update_batch.batch['token_level_scores'] = reward_tensor
+                            # ppo_update_batch.non_tensor_batch.update(reward_extra_infos_dict)
+                            # print(f"{step_info_prefix} [DEBUG PPO Reward] Reward Tensor Shape: {reward_tensor.shape}, Non-zero rewards: {torch.count_nonzero(reward_tensor)}")
+                            # print(f"{step_info_prefix} [DEBUG PPO Reward] Extra Info (first item):")
+                            # if len(valid_original_indices) > 0:
+                            #     first_item_rewards = {k: v[0] for k, v in reward_extra_infos_dict.items() if hasattr(v, '__len__') and len(v) > 0}
+                            #     print(pformat(first_item_rewards))
                             # === Explicit Reward Calculation ===
                             with _timer('PPO_Reward', timing_raw):
                                 reward_result = self.reward_fn(ppo_update_batch, return_dict=True)
                                 reward_tensor = reward_result['reward_tensor']
+                                print(f"{step_info_prefix} SHAPE of reward_tensor: {reward_tensor.shape}") # PRINT SHAPE
                                 reward_extra_infos_dict = reward_result.get('reward_extra_info', {})
                             ppo_update_batch.batch['token_level_scores'] = reward_tensor
+                            print(f"{step_info_prefix} SHAPE of ppo_update_batch.batch['token_level_scores']: {ppo_update_batch.batch['token_level_scores'].shape}") # PRINT SHAPE
                             ppo_update_batch.non_tensor_batch.update(reward_extra_infos_dict)
                             print(f"{step_info_prefix} [DEBUG PPO Reward] Reward Tensor Shape: {reward_tensor.shape}, Non-zero rewards: {torch.count_nonzero(reward_tensor)}")
                             print(f"{step_info_prefix} [DEBUG PPO Reward] Extra Info (first item):")
                             if len(valid_original_indices) > 0:
                                 first_item_rewards = {k: v[0] for k, v in reward_extra_infos_dict.items() if hasattr(v, '__len__') and len(v) > 0}
                                 print(pformat(first_item_rewards))
+                            # ==================================
                             # ==================================
 
                             # Compute Log Probs (Actor and Ref)

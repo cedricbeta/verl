@@ -95,6 +95,8 @@ class ActorRolloutRefWorker(Worker):
                                                         mesh_dim_names=['dp', 'sp'])
 
         self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
+        effective_dp_size = (self.device_mesh.size() // self.ulysses_sequence_parallel_size)
+        print(f"DEBUG FSDP_WORKER: world_size={world_size}, ulysses_sp_size={self.ulysses_sequence_parallel_size}, effective_dp_size={effective_dp_size}")
 
         self.role = role
         assert self.role in ['actor', 'rollout', 'ref', 'actor_rollout', 'actor_rollout_ref']
@@ -115,7 +117,12 @@ class ActorRolloutRefWorker(Worker):
         # normalize config
         if self._is_actor:
             self.config.actor.ppo_mini_batch_size *= self.config.rollout.n
+            print(f'Actor config1: {self.config.actor.ppo_mini_batch_size}, {self.config.actor.ppo_micro_batch_size}')
             self.config.actor.ppo_mini_batch_size //= (self.device_mesh.size() // self.ulysses_sequence_parallel_size)
+            print(f'Actor config2: {self.config.actor.ppo_mini_batch_size}, {self.config.actor.ppo_micro_batch_size}')
+            
+            print(f"DEBUG FSDP_WORKER (Actor): Initial ppo_micro_batch_size_per_gpu = {self.config.actor.get('ppo_micro_batch_size_per_gpu')}")
+            print(f"DEBUG FSDP_WORKER (Actor): Initial ppo_micro_batch_size (deprecated) = {self.config.actor.get('ppo_micro_batch_size')}")
             assert self.config.actor.ppo_mini_batch_size > 0, f'ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be larger than 0 after normalization'
             # micro bsz
             if self.config.actor.ppo_micro_batch_size is not None:
@@ -126,12 +133,17 @@ class ActorRolloutRefWorker(Worker):
                     f'normalized ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be divisible by ppo_micro_batch_size_per_gpu {self.config.actor.ppo_micro_batch_size_per_gpu}'
                 assert self.config.actor.ppo_mini_batch_size // self.config.actor.ppo_micro_batch_size_per_gpu > 0, \
                     f'normalized ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be larger than ppo_micro_batch_size_per_gpu {self.config.actor.ppo_micro_batch_size_per_gpu}'
-
+                print(f"DEBUG FSDP_WORKER (Actor): Normalized ppo_micro_batch_size (from deprecated) = {self.config.actor.ppo_micro_batch_size}")
+                print(f"DEBUG FSDP_WORKER (Actor): Overwritten ppo_micro_batch_size_per_gpu (from deprecated logic) = {self.config.actor.ppo_micro_batch_size_per_gpu}")
+       
         # normalize rollout config
         if self._is_rollout and self.config.rollout.log_prob_micro_batch_size is not None:
+            print(f"DEBUG FSDP_WORKER (Rollout): Initial log_prob_micro_batch_size (deprecated) = {self.config.rollout.log_prob_micro_batch_size}")
+   
             self.config.rollout.log_prob_micro_batch_size //= (self.device_mesh.size() //
                                                                self.ulysses_sequence_parallel_size)
             self.config.rollout.log_prob_micro_batch_size_per_gpu = self.config.rollout.log_prob_micro_batch_size
+            print(f"DEBUG FSDP_WORKER (Rollout): Normalized log_prob_micro_batch_size_per_gpu (from deprecated) = {self.config.rollout.log_prob_micro_batch_size_per_gpu}")
         # normalize ref config
         if self._is_ref and self.config.ref.log_prob_micro_batch_size is not None:
             self.config.ref.log_prob_micro_batch_size //= (self.device_mesh.size() //
@@ -411,6 +423,7 @@ class ActorRolloutRefWorker(Worker):
             OmegaConf.set_struct(self.config.actor, True)
             with open_dict(self.config.actor):
                 self.config.actor.use_remove_padding = use_remove_padding
+            print(f'Actor config: {self.config.actor.ppo_mini_batch_size}, {self.config.actor.ppo_micro_batch_size}')
             self.actor = DataParallelPPOActor(config=self.config.actor,
                                               actor_module=self.actor_module_fsdp,
                                               actor_optimizer=self.actor_optimizer)

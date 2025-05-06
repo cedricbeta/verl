@@ -502,7 +502,8 @@ class TwoStageVideoQADataset(Dataset):
         self.video_id_key = config.get("video_id_key", "video_id")
         self.temproal_key = config.get("temporal_key", "temporal_grounding") # Optional, for Stage 2
         # Video file parameters
-        self.video_base_path = config.get("video_base_path", '/home/chendong/video-rl/charades_sta/Charades_v1_480')
+        # self.video_base_path = config.get("video_base_path", '/home/chendong/video-rl/charades_sta/Charades_v1_480')
+        self.video_base_path = config.get("video_base_path", '/dev/shm/.cache/huggingface/datasets/charades_sta/Charades_v1_480')
         if not self.video_base_path or not os.path.isdir(self.video_base_path):
              raise ValueError(f"`video_base_path` ('{self.video_base_path}') must be specified and exist.")
         self.video_extension = config.get("video_extension", ".mp4")
