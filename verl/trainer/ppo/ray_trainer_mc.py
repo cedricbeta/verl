@@ -673,7 +673,7 @@ class RayPPOTrainer(object):
         from verl.utils.dataset.vqa_dataset import TwoStageVideoQADataset
         
         two_stage_dataset = TwoStageVideoQADataset(
-            data_files="/root/data/charades_vqa.jsonl",
+            data_files=self.config.data.train_files,
             tokenizer=self.tokenizer,
             processor=self.processor,
             config=self.config.data,
