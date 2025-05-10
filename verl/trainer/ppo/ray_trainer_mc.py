@@ -534,24 +534,33 @@ def prepare_stage2_inputs_for_item(item_data, processor, tokenizer, config):
     """Prepares tokenized text and combines with video features for one item."""
     question_text = item_data["question_text"]
     clipped_video_frames_tensor = item_data["clipped_video"] # Assumes this is a Tensor TCHW
+    original_idx_debug = item_data.get("original_index", "N/A") # For debugging
 
     qa_system_prompt = '''You FIRST think about the reasoning process as an internal monologue and then provide the final answer.
                         The reasoning process MUST BE enclosed within <think> </think> tags.
                         The final answer MUST BE put in <answer> </answer> tags, containing only the letter of the correct option.'''
     stage2_messages = []
-    if qa_system_prompt: # Assuming system_prompt is a string or None
+    if qa_system_prompt: 
          stage2_messages.append({"role": "system", "content": qa_system_prompt})
-    stage2_messages.append({"role": "user", "content": question_text}) # Processor will add <video> if videos are passed
+    stage2_messages.append({"role": "user", "content": question_text}) 
 
-    # Call processor ONCE to get all outputs
-    # `processor_outputs_all` will contain 'input_ids', 'attention_mask', 
-    # 'pixel_values_videos', 'video_grid_thw', 'second_per_grid_ts', etc.
     processor_outputs_all = processor(
         text=[processor.apply_chat_template(stage2_messages, add_generation_prompt=True, tokenize=False)],
-        images=None, # No separate images for Stage 2 in this flow
+        images=None, 
         videos=[clipped_video_frames_tensor],
         return_tensors="pt"
     )
+
+    # +++ START DEBUG BLOCK +++
+    # print(f"[Prepare S2 DEBUG - Item {original_idx_debug}] BEFORE POP - processor_outputs_all keys: {list(processor_outputs_all.keys())}")
+    # for k_debug, v_debug in processor_outputs_all.items():
+    #     if isinstance(v_debug, torch.Tensor):
+    #         print(f"[Prepare S2 DEBUG - Item {original_idx_debug}]   Key: {k_debug}, Type: {type(v_debug)}, Shape: {v_debug.shape}")
+    #     elif isinstance(v_debug, list) and v_debug and isinstance(v_debug[0], torch.Tensor):
+    #         print(f"[Prepare S2 DEBUG - Item {original_idx_debug}]   Key: {k_debug}, Type: list of Tensors, Len: {len(v_debug)}, First Shape: {v_debug[0].shape}")
+    #     else:
+    #         print(f"[Prepare S2 DEBUG - Item {original_idx_debug}]   Key: {k_debug}, Type: {type(v_debug)}")
+    # +++ END DEBUG BLOCK +++
 
     if "input_ids" not in processor_outputs_all or "attention_mask" not in processor_outputs_all:
          raise ValueError("Processor output missing 'input_ids' or 'attention_mask' for Stage 2")
@@ -559,71 +568,165 @@ def prepare_stage2_inputs_for_item(item_data, processor, tokenizer, config):
     s2_input_ids_raw = processor_outputs_all.pop("input_ids") 
     s2_attn_mask_raw = processor_outputs_all.pop("attention_mask")
 
-    # `processor_outputs_all` now contains remaining items like 'pixel_values_videos', 'video_grid_thw', 'second_per_grid_ts'
-
-    # Pad/Truncate S2 prompt (text part)
+    # +++ START DEBUG BLOCK +++
+    # print(f"[Prepare S2 DEBUG - Item {original_idx_debug}] AFTER POP (input_ids, attention_mask) - remaining processor_outputs_all keys: {list(processor_outputs_all.keys())}")
+    # for k_debug, v_debug in processor_outputs_all.items():
+    #     if isinstance(v_debug, torch.Tensor):
+    #         print(f"[Prepare S2 DEBUG - Item {original_idx_debug}]   Key: {k_debug}, Type: {type(v_debug)}, Shape: {v_debug.shape}")
+    #     elif isinstance(v_debug, list) and v_debug and isinstance(v_debug[0], torch.Tensor):
+    #         print(f"[Prepare S2 DEBUG - Item {original_idx_debug}]   Key: {k_debug}, Type: list of Tensors, Len: {len(v_debug)}, First Shape: {v_debug[0].shape}")
+    #     else:
+    #         print(f"[Prepare S2 DEBUG - Item {original_idx_debug}]   Key: {k_debug}, Type: {type(v_debug)}")
+    # +++ END DEBUG BLOCK +++
+    
     stage2_input_ids_padded, stage2_attention_mask_padded = verl_F.postprocess_data(
          input_ids=s2_input_ids_raw, 
          attention_mask=s2_attn_mask_raw,
-         max_length=config.data.get("max_prompt_length", 4096), # Use a relevant max length for S2 prompt
+         max_length=config.data.get("max_prompt_length", 4096), 
          pad_token_id=tokenizer.pad_token_id,
          left_pad=True, 
-         truncation='error' # Or 'right' as needed
+         truncation='error' 
      )
 
-    # Calculate Position IDs using get_rope_index
-    # `get_rope_index` needs access to `second_per_grid_ts` from the original processor output.
     stage2_position_ids = None
-    # Create a temporary dict that mimics `model_inputs` for `get_rope_index`
-    temp_model_inputs_for_rope = dict(processor_outputs_all) # Has 'video_grid_thw', 'second_per_grid_ts' etc.
+    temp_model_inputs_for_rope = dict(processor_outputs_all) 
 
     try:
-        from verl.models.transformers.qwen2_vl import get_rope_index # Ensure correct import
+        from verl.models.transformers.qwen2_vl import get_rope_index 
         stage2_position_ids_list = [
             get_rope_index(
                 processor,
-                input_ids=stage2_input_ids_padded[0], # Use the padded input_ids
+                input_ids=stage2_input_ids_padded[0], 
                 image_grid_thw=temp_model_inputs_for_rope.get("image_grid_thw"),
                 video_grid_thw=temp_model_inputs_for_rope.get("video_grid_thw"),
-                second_per_grid_ts=temp_model_inputs_for_rope.get("second_per_grid_ts"), # Crucial: Use value from processor_outputs_all
-                attention_mask=stage2_attention_mask_padded[0], # Use the padded attention_mask
+                second_per_grid_ts=temp_model_inputs_for_rope.get("second_per_grid_ts"), 
+                attention_mask=stage2_attention_mask_padded[0], 
             )
         ]
         stage2_position_ids = stage2_position_ids_list[0] 
-        # print(f"[Prepare S2 DEBUG] Calculated RoPE Position IDs shape: {stage2_position_ids.shape if stage2_position_ids is not None else 'None'}")
     except ImportError:
-        print("[Prepare S2 WARN] verl.models.transformers.qwen2_vl.get_rope_index not found. Falling back to basic position IDs.")
+        print(f"[Prepare S2 WARN - Item {original_idx_debug}] verl.models.transformers.qwen2_vl.get_rope_index not found. Falling back to basic position IDs.")
         stage2_position_ids = compute_position_id_with_mask(stage2_attention_mask_padded)[0]
     except Exception as rope_err:
-        print(f"[Prepare S2 ERROR] Error calculating RoPE Position IDs: {rope_err}. Falling back to basic position IDs.")
+        print(f"[Prepare S2 ERROR - Item {original_idx_debug}] Error calculating RoPE Position IDs: {rope_err}. Falling back to basic position IDs.")
         import traceback; traceback.print_exc()
         stage2_position_ids = compute_position_id_with_mask(stage2_attention_mask_padded)[0]
 
     if stage2_position_ids is None: 
-        print("[Prepare S2 ERROR] Position ID calculation failed completely. Using basic IDs.")
+        print(f"[Prepare S2 ERROR - Item {original_idx_debug}] Position ID calculation failed completely. Using basic IDs.")
         stage2_position_ids = compute_position_id_with_mask(stage2_attention_mask_padded)[0]
 
-    # --- Prepare the final `multi_modal_inputs` dictionary for the PPO actor ---
-    # This dictionary should ONLY contain TENSOR features that the actor model's `forward` method expects.
-    # `processor_outputs_all` currently holds Tensors like 'pixel_values_videos', 'video_grid_thw'
-    # AND potentially list-based items like 'second_per_grid_ts'.
-    
     final_multi_modal_inputs_for_actor = {}
     if isinstance(processor_outputs_all, dict):
         for key, value in processor_outputs_all.items():
-            if isinstance(value, torch.Tensor): # Only keep Tensors
+            if isinstance(value, torch.Tensor): 
                 final_multi_modal_inputs_for_actor[key] = value
-            # else:
-                # print(f"[Prepare S2 DEBUG] Skipping non-tensor key '{key}' (type: {type(value)}) from final multi_modal_inputs for actor.")
     
-    # print(f"[Prepare S2 DEBUG] Final multi_modal_inputs for actor keys: {list(final_multi_modal_inputs_for_actor.keys())}")
+    # +++ START DEBUG BLOCK +++
+    # print(f"[Prepare S2 DEBUG - Item {original_idx_debug}] final_multi_modal_inputs_for_actor keys: {list(final_multi_modal_inputs_for_actor.keys())}")
+    # +++ END DEBUG BLOCK +++
 
     return {
-        'input_ids': stage2_input_ids_padded[0],       # Padded S2 prompt tokens
-        'attention_mask': stage2_attention_mask_padded[0], # Padded S2 prompt mask
-        'position_ids': stage2_position_ids,           # RoPE or Fallback Position IDs for S2 prompt
-        'multi_modal_inputs': final_multi_modal_inputs_for_actor, # DICT of TENSOR features for PPO actor
+        'input_ids': stage2_input_ids_padded[0],       
+        'attention_mask': stage2_attention_mask_padded[0], 
+        'position_ids': stage2_position_ids,           
+        'multi_modal_inputs': final_multi_modal_inputs_for_actor, 
     }
+    
+# def prepare_stage2_inputs_for_item(item_data, processor, tokenizer, config):
+#     """Prepares tokenized text and combines with video features for one item."""
+#     question_text = item_data["question_text"]
+#     clipped_video_frames_tensor = item_data["clipped_video"] # Assumes this is a Tensor TCHW
+
+#     qa_system_prompt = '''You FIRST think about the reasoning process as an internal monologue and then provide the final answer.
+#                         The reasoning process MUST BE enclosed within <think> </think> tags.
+#                         The final answer MUST BE put in <answer> </answer> tags, containing only the letter of the correct option.'''
+#     stage2_messages = []
+#     if qa_system_prompt: # Assuming system_prompt is a string or None
+#          stage2_messages.append({"role": "system", "content": qa_system_prompt})
+#     stage2_messages.append({"role": "user", "content": question_text}) # Processor will add <video> if videos are passed
+
+#     # Call processor ONCE to get all outputs
+#     # `processor_outputs_all` will contain 'input_ids', 'attention_mask', 
+#     # 'pixel_values_videos', 'video_grid_thw', 'second_per_grid_ts', etc.
+#     processor_outputs_all = processor(
+#         text=[processor.apply_chat_template(stage2_messages, add_generation_prompt=True, tokenize=False)],
+#         images=None, # No separate images for Stage 2 in this flow
+#         videos=[clipped_video_frames_tensor],
+#         return_tensors="pt"
+#     )
+
+#     if "input_ids" not in processor_outputs_all or "attention_mask" not in processor_outputs_all:
+#          raise ValueError("Processor output missing 'input_ids' or 'attention_mask' for Stage 2")
+
+#     s2_input_ids_raw = processor_outputs_all.pop("input_ids") 
+#     s2_attn_mask_raw = processor_outputs_all.pop("attention_mask")
+
+#     # `processor_outputs_all` now contains remaining items like 'pixel_values_videos', 'video_grid_thw', 'second_per_grid_ts'
+
+#     # Pad/Truncate S2 prompt (text part)
+#     stage2_input_ids_padded, stage2_attention_mask_padded = verl_F.postprocess_data(
+#          input_ids=s2_input_ids_raw, 
+#          attention_mask=s2_attn_mask_raw,
+#          max_length=config.data.get("max_prompt_length", 4096), # Use a relevant max length for S2 prompt
+#          pad_token_id=tokenizer.pad_token_id,
+#          left_pad=True, 
+#          truncation='error' # Or 'right' as needed
+#      )
+
+#     # Calculate Position IDs using get_rope_index
+#     # `get_rope_index` needs access to `second_per_grid_ts` from the original processor output.
+#     stage2_position_ids = None
+#     # Create a temporary dict that mimics `model_inputs` for `get_rope_index`
+#     temp_model_inputs_for_rope = dict(processor_outputs_all) # Has 'video_grid_thw', 'second_per_grid_ts' etc.
+
+#     try:
+#         from verl.models.transformers.qwen2_vl import get_rope_index # Ensure correct import
+#         stage2_position_ids_list = [
+#             get_rope_index(
+#                 processor,
+#                 input_ids=stage2_input_ids_padded[0], # Use the padded input_ids
+#                 image_grid_thw=temp_model_inputs_for_rope.get("image_grid_thw"),
+#                 video_grid_thw=temp_model_inputs_for_rope.get("video_grid_thw"),
+#                 second_per_grid_ts=temp_model_inputs_for_rope.get("second_per_grid_ts"), # Crucial: Use value from processor_outputs_all
+#                 attention_mask=stage2_attention_mask_padded[0], # Use the padded attention_mask
+#             )
+#         ]
+#         stage2_position_ids = stage2_position_ids_list[0] 
+#         # print(f"[Prepare S2 DEBUG] Calculated RoPE Position IDs shape: {stage2_position_ids.shape if stage2_position_ids is not None else 'None'}")
+#     except ImportError:
+#         print("[Prepare S2 WARN] verl.models.transformers.qwen2_vl.get_rope_index not found. Falling back to basic position IDs.")
+#         stage2_position_ids = compute_position_id_with_mask(stage2_attention_mask_padded)[0]
+#     except Exception as rope_err:
+#         print(f"[Prepare S2 ERROR] Error calculating RoPE Position IDs: {rope_err}. Falling back to basic position IDs.")
+#         import traceback; traceback.print_exc()
+#         stage2_position_ids = compute_position_id_with_mask(stage2_attention_mask_padded)[0]
+
+#     if stage2_position_ids is None: 
+#         print("[Prepare S2 ERROR] Position ID calculation failed completely. Using basic IDs.")
+#         stage2_position_ids = compute_position_id_with_mask(stage2_attention_mask_padded)[0]
+
+#     # --- Prepare the final `multi_modal_inputs` dictionary for the PPO actor ---
+#     # This dictionary should ONLY contain TENSOR features that the actor model's `forward` method expects.
+#     # `processor_outputs_all` currently holds Tensors like 'pixel_values_videos', 'video_grid_thw'
+#     # AND potentially list-based items like 'second_per_grid_ts'.
+    
+#     final_multi_modal_inputs_for_actor = {}
+#     if isinstance(processor_outputs_all, dict):
+#         for key, value in processor_outputs_all.items():
+#             if isinstance(value, torch.Tensor): # Only keep Tensors
+#                 final_multi_modal_inputs_for_actor[key] = value
+#             # else:
+#                 # print(f"[Prepare S2 DEBUG] Skipping non-tensor key '{key}' (type: {type(value)}) from final multi_modal_inputs for actor.")
+    
+#     # print(f"[Prepare S2 DEBUG] Final multi_modal_inputs for actor keys: {list(final_multi_modal_inputs_for_actor.keys())}")
+
+#     return {
+#         'input_ids': stage2_input_ids_padded[0],       # Padded S2 prompt tokens
+#         'attention_mask': stage2_attention_mask_padded[0], # Padded S2 prompt mask
+#         'position_ids': stage2_position_ids,           # RoPE or Fallback Position IDs for S2 prompt
+#         'multi_modal_inputs': final_multi_modal_inputs_for_actor, # DICT of TENSOR features for PPO actor
+#     }
     
 
 @contextmanager
@@ -1220,8 +1323,11 @@ class RayPPOTrainer(object):
         # --- Process Aggregated Metrics for the entire validation set ---
         print(f"{step_info_prefix_val} [VQA VAL DEBUG] Processing all aggregated validation metrics from accumulator...")
         final_val_metrics_summary = {}
-        vqa_target_metrics_for_summary = ['grounding_accuracy', 'grounding_format', 'grounding_score', 
-                                          'qa_accuracy', 'final_score', 's2_frame_num_ratio']
+        vqa_target_metrics_for_summary = [
+                    's1_grounding_iou', 's1_grounding_format_score', 's1_base_format_correct', 's1_thinking_present',
+                    's1_grounding_combined_score_unweighted', 's2_qa_accuracy_correct', 's2_qa_format_score',
+                    's2_base_format_correct', 's2_thinking_present', 'final_weighted_score'
+                ]
         
         for metric_name_val in vqa_target_metrics_for_summary:
             values_val = all_val_run_metrics_accumulator.get(metric_name_val, [])

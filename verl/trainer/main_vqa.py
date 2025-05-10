@@ -170,19 +170,21 @@ class TaskRunner:
 
         #     raise NotImplementedError
 
-        from verl.workers.reward_manager import TVGRewardManager
-        tvg_reward_fn = TVGRewardManager(
-            tokenizer=tokenizer,
-            num_examine=1 # Example: get from config
-        )
+        # from verl.workers.reward_manager import TVGRewardManager
+        # tvg_reward_fn = TVGRewardManager(
+        #     tokenizer=tokenizer,
+        #     num_examine=1 # Example: get from config
+        # )
         
-        from verl.workers.reward_manager import VQACombinedRewardManager
+        # from verl.workers.reward_manager import VQACombinedRewardManager
         from verl.workers.reward_manager import VQAMultiStageRewardManager
-        grounding_weight = config.reward_model.get("grounding_weight", 0.4)
-        qa_weight = config.reward_model.get("qa_weight", 0.4)
-        num_examine = config.reward_model.get("num_examine", 1) # Example
+        print(f"Using VQA reward manager with config: {config.trainer.grounding_weight}, {config.trainer.qa_accuracy_weight}, {config.trainer.qa_format_weight}")
         vqa_reward_fn = VQAMultiStageRewardManager(
-            tokenizer=tokenizer
+            tokenizer=tokenizer,
+            grounding_weight=config.trainer.grounding_weight,
+            qa_accuracy_weight=config.trainer.qa_accuracy_weight,
+            qa_format_weight=config.trainer.qa_format_weight,
+            num_examine=1,
         )
         
         compute_score = get_custom_reward_fn(config)
