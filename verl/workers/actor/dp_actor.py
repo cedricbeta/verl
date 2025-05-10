@@ -32,7 +32,7 @@ from verl.utils.seqlen_balancing import rearrange_micro_batches, get_reverse_idx
 import verl.utils.torch_functional as verl_F
 
 from flash_attn.bert_padding import pad_input, unpad_input, rearrange, index_first_axis
-
+import numpy as np
 __all__ = ['DataParallelPPOActor']
 
 
@@ -60,131 +60,241 @@ class DataParallelPPOActor(BasePPOActor):
         
 
 
-    def _forward_micro_batch(self,
-                             micro_batch,
-                             temperature,
-                             calculate_entropy=False) -> Tuple[torch.Tensor, torch.Tensor]:
+    # def _forward_micro_batch(self,
+    #                          micro_batch,
+    #                          temperature,
+    #                          calculate_entropy=False) -> Tuple[torch.Tensor, torch.Tensor]:
+    #     """
+    #     Returns: 
+    #         entropy: # (bs, response_len)
+    #         log_probs: # (bs, response_len)
+    #     """
+    #     response_length = micro_batch['responses'].size(-1)
+    #     # multi_modal_inputs = {}
+    #     # if 'multi_modal_inputs' in micro_batch:
+    #     #     for key in micro_batch['multi_modal_inputs'][0].keys():
+    #     #         multi_modal_inputs[key] = torch.cat([inputs[key] for inputs in micro_batch['multi_modal_inputs']],
+    #     #                                             dim=0)
+    #     multi_modal_inputs_processed = {}
+    #     if 'multi_modal_inputs' in micro_batch:
+    #         mm_inputs_in_micro_batch = micro_batch['multi_modal_inputs']
+    #         # print(f"DEBUG ACTOR FORWARD: Type of micro_batch['multi_modal_inputs']: {type(mm_inputs_in_micro_batch)}")
+
+    #         items_to_process = []
+    #         if isinstance(mm_inputs_in_micro_batch, np.ndarray):
+    #             if mm_inputs_in_micro_batch.ndim == 1 and mm_inputs_in_micro_batch.size > 0:
+    #                 if isinstance(mm_inputs_in_micro_batch[0], dict):
+    #                     items_to_process = list(mm_inputs_in_micro_batch)
+    #                 # else: print(f"ERROR ACTOR FORWARD: numpy.ndarray for multi_modal_inputs does not contain dicts...")
+    #             # elif mm_inputs_in_micro_batch.size == 0: print(f"DEBUG ACTOR FORWARD: multi_modal_inputs is an empty numpy.ndarray.")
+    #             # else: print(f"ERROR ACTOR FORWARD: numpy.ndarray for multi_modal_inputs has unexpected shape...")
+    #         elif isinstance(mm_inputs_in_micro_batch, list):
+    #             items_to_process = mm_inputs_in_micro_batch
+    #         # elif mm_inputs_in_micro_batch is not None: print(f"ERROR ACTOR FORWARD: multi_modal_inputs is of unexpected type...")
+
+    #         if items_to_process and isinstance(items_to_process[0], dict):
+    #             sample_keys = items_to_process[0].keys()
+                
+    #             for key_to_process in sample_keys:
+    #                 is_tensor_key = True # Assume it's a tensor key initially
+    #                 first_item_value_for_key = items_to_process[0].get(key_to_process)
+
+    #                 if isinstance(first_item_value_for_key, torch.Tensor):
+    #                     # Logic for concatenating tensors (like pixel_values_videos, video_grid_thw)
+    #                     list_of_tensors_for_key = []
+    #                     valid_concat = True
+    #                     for item_dict in items_to_process:
+    #                         tensor_val = item_dict.get(key_to_process)
+    #                         if isinstance(tensor_val, torch.Tensor):
+    #                             list_of_tensors_for_key.append(tensor_val)
+    #                         elif tensor_val is not None: # Value exists but is not a tensor
+    #                             print(f"ERROR ACTOR FORWARD: For tensor key '{key_to_process}', item value is {type(tensor_val)}, expected torch.Tensor.")
+    #                             valid_concat = False; break
+                        
+    #                     if valid_concat and list_of_tensors_for_key:
+    #                         try:
+    #                             target_device = micro_batch.get('input_ids', list_of_tensors_for_key[0]).device
+    #                             moved_tensors = [t.to(target_device) for t in list_of_tensors_for_key]
+    #                             multi_modal_inputs_processed[key_to_process] = torch.cat(moved_tensors, dim=0)
+    #                             # print(f"DEBUG ACTOR FORWARD: Concatenated key '{key_to_process}', shape: {multi_modal_inputs_processed[key_to_process].shape}")
+    #                         except Exception as e:
+    #                             print(f"ERROR ACTOR FORWARD: Failed to cat tensors for key '{key_to_process}': {e}")
+    #                     # else: print(f"WARN ACTOR FORWARD: No tensors to cat for key '{key_to_process}' or type mismatch.")
+
+    #                 elif isinstance(first_item_value_for_key, list):
+    #                     # Handle list-type metadata like 'second_per_grid_ts'
+    #                     # The model might expect this as a list of lists (one for each item in the batch)
+    #                     # or it might need to be padded and converted to a tensor.
+    #                     # For now, let's collect it as a list of lists.
+    #                     list_of_lists_for_key = []
+    #                     valid_list_key = True
+    #                     for item_dict in items_to_process:
+    #                         list_val = item_dict.get(key_to_process)
+    #                         if isinstance(list_val, list):
+    #                             list_of_lists_for_key.append(list_val)
+    #                         elif list_val is not None:
+    #                             print(f"ERROR ACTOR FORWARD: For list key '{key_to_process}', item value is {type(list_val)}, expected list.")
+    #                             valid_list_key = False; break
+                        
+    #                     if valid_list_key and list_of_lists_for_key:
+    #                         multi_modal_inputs_processed[key_to_process] = list_of_lists_for_key
+    #                         # print(f"DEBUG ACTOR FORWARD: Added key '{key_to_process}' as a list of {len(list_of_lists_for_key)} lists.")
+    #                     # else: print(f"WARN ACTOR FORWARD: Not all items had a list for key '{key_to_process}', or key was inconsistent.")
+                    
+    #                 elif first_item_value_for_key is not None: # Other data types
+    #                     print(f"WARN ACTOR FORWARD: Key '{key_to_process}' has unhandled type {type(first_item_value_for_key)}. Not included in model args.")
+                        
+    #     multi_modal_inputs_arg = multi_modal_inputs_processed
+    #     print(f"DEBUG ACTOR FORWARD: multi_modal_inputs_arg for model: { {k: v.shape if isinstance(v, torch.Tensor) else (type(v), len(v) if isinstance(v,list) else None) for k,v in multi_modal_inputs_arg.items()} if multi_modal_inputs_arg else '{}' }")
+
+    #     with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+    #         input_ids = micro_batch['input_ids']
+    #         batch_size, seqlen = input_ids.shape
+    #         attention_mask = micro_batch['attention_mask']
+    #         position_ids = micro_batch['position_ids']
+    #         entropy = None
+    #         if position_ids.dim() == 3:  # qwen2vl mrope
+    #             position_ids = position_ids.transpose(0, 1)  # (bsz, 3, seqlen) -> (3, bsz, seqlen)
+
+    #         if self.use_remove_padding:
+    #             input_ids_rmpad, indices, *_ = unpad_input(input_ids.unsqueeze(-1),
+    #                                                        attention_mask)  # input_ids_rmpad (total_nnz, ...)
+    #             input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # (1, total_nnz)
+
+    #             # unpad the position_ids to align the rotary
+    #             if position_ids.dim() == 3:
+    #                 position_ids_rmpad = index_first_axis(rearrange(position_ids, "c b s ... -> (b s) c ..."),
+    #                                                       indices).transpose(0, 1).unsqueeze(
+    #                                                           1)  # (3, bsz, seqlen) -> (3, 1, bsz * seqlen)
+    #             else:
+    #                 position_ids_rmpad = index_first_axis(rearrange(position_ids.unsqueeze(-1), "b s ... -> (b s) ..."),
+    #                                                       indices).transpose(0, 1)
+
+    #             # for compute the log_prob
+    #             input_ids_rmpad_rolled = torch.roll(input_ids_rmpad, shifts=-1, dims=1)  # (1, total_nnz)
+
+    #             # pad and slice the inputs if sp > 1
+    #             if self.use_ulysses_sp:
+    #                 input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad_and_slice_inputs(input_ids_rmpad, \
+    #                                                                                             position_ids_rmpad, \
+    #                                                                                             sp_size=self.ulysses_sequence_parallel_size)
+    #                 input_ids_rmpad_rolled, _, _ = ulysses_pad_and_slice_inputs(input_ids_rmpad_rolled, None,
+    #                                                                             self.ulysses_sequence_parallel_size)
+
+    #             input_ids_rmpad_rolled = input_ids_rmpad_rolled.squeeze(0)  # ((total_nnz / sp) + pad)
+
+    #             # only pass input_ids and position_ids to enable flash_attn_varlen
+    #             output = self.actor_module(input_ids=input_ids_rmpad,
+    #                                        attention_mask=None,
+    #                                        position_ids=position_ids_rmpad,
+    #                                        **multi_modal_inputs_arg,
+    #                                        use_cache=False)  # prevent model thinks we are generating
+    #             logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
+
+    #             logits_rmpad.div_(temperature)
+
+    #             # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
+    #             inplace_backward = True
+    #             if calculate_entropy:
+    #                 inplace_backward = False
+    #             log_probs = logprobs_from_logits(logits=logits_rmpad,
+    #                                              labels=input_ids_rmpad_rolled,
+    #                                              inplace_backward=inplace_backward)
+
+    #             # compute entropy
+    #             if calculate_entropy:
+    #                 entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)  # ((total_nnz / sp) + pad)
+
+    #             # gather log_prob if sp > 1
+    #             if self.use_ulysses_sp:
+    #                 # gather and unpad for the ulysses sp
+    #                 log_probs = gather_outpus_and_unpad(log_probs, gather_dim=0, unpad_dim=0, padding_size=pad_size)
+    #                 if calculate_entropy:
+    #                     entropy_rmpad = gather_outpus_and_unpad(entropy_rmpad,
+    #                                                             gather_dim=0,
+    #                                                             unpad_dim=0,
+    #                                                             padding_size=pad_size)
+    #             # pad back to (bsz, seqlen)
+    #             if calculate_entropy:
+    #                 full_entropy = pad_input(hidden_states=entropy_rmpad.unsqueeze(-1),
+    #                                          indices=indices,
+    #                                          batch=batch_size,
+    #                                          seqlen=seqlen)
+    #             full_log_probs = pad_input(hidden_states=log_probs.unsqueeze(-1),
+    #                                        indices=indices,
+    #                                        batch=batch_size,
+    #                                        seqlen=seqlen)
+
+    #             # only return response part:
+    #             if calculate_entropy:
+    #                 entropy = full_entropy.squeeze(-1)[:, -response_length - 1:-1]  # (bsz, response_length)
+    #             log_probs = full_log_probs.squeeze(-1)[:, -response_length - 1:-1]  # (bsz, response_length)
+
+    #         else:  # not using rmpad and no ulysses sp
+    #             output = self.actor_module(input_ids=input_ids,
+    #                                        attention_mask=attention_mask,
+    #                                        position_ids=position_ids,
+    #                                        **multi_modal_inputs_arg,
+    #                                        use_cache=False)  # prevent model thinks we are generating
+    #             logits = output.logits
+    #             logits.div_(temperature)
+    #             logits = logits[:, -response_length - 1:-1, :]  # (bsz, response_length, vocab_size)
+    #             log_probs = logprobs_from_logits(logits, micro_batch['responses'])
+    #             if calculate_entropy:
+    #                 entropy = verl_F.entropy_from_logits(logits)  # (bsz, response_length)
+                    
+
+    #         return entropy, log_probs
+    
+    def _forward_micro_batch(self, micro_batch, temperature, calculate_entropy=False) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Returns: 
+        Returns:
             entropy: # (bs, response_len)
             log_probs: # (bs, response_len)
         """
-        response_length = micro_batch['responses'].size(-1)
-        # multi_modal_inputs = {}
-        # if 'multi_modal_inputs' in micro_batch:
-        #     for key in micro_batch['multi_modal_inputs'][0].keys():
-        #         multi_modal_inputs[key] = torch.cat([inputs[key] for inputs in micro_batch['multi_modal_inputs']],
-        #                                             dim=0)
-        multi_modal_inputs_processed = {} # Renamed to avoid confusion
-        if 'multi_modal_inputs' in micro_batch:
-            mm_inputs_in_micro_batch = micro_batch['multi_modal_inputs']
-            print(f"\nDEBUG ACTOR FORWARD: Type of micro_batch['multi_modal_inputs']: {type(mm_inputs_in_micro_batch)}")
-            if isinstance(mm_inputs_in_micro_batch, list) and len(mm_inputs_in_micro_batch) > 0:
-                print(f"DEBUG ACTOR FORWARD: Length of list: {len(mm_inputs_in_micro_batch)}")
-                first_element = mm_inputs_in_micro_batch[0]
-                print(f"DEBUG ACTOR FORWARD: Type of first element: {type(first_element)}")
-                if isinstance(first_element, dict):
-                    print(f"DEBUG ACTOR FORWARD: Keys in first element dict: {list(first_element.keys())}")
-                    for key, value in first_element.items():
-                        print(f"DEBUG ACTOR FORWARD: Type of value for key '{key}' in first element: {type(value)}")
-                        if isinstance(value, torch.Tensor):
-                            print(f"DEBUG ACTOR FORWARD: Shape of tensor for key '{key}' in first element: {value.shape}")
-                else:
-                    # Print content if not a dict and not too large
-                    try: print(f"DEBUG ACTOR FORWARD: First element content: {str(first_element)[:200]}...")
-                    except: print("DEBUG ACTOR FORWARD: First element content: <Cannot print>")
-            elif isinstance(mm_inputs_in_micro_batch, dict):
-                print(f"DEBUG ACTOR FORWARD: It's a dict! Keys: {list(mm_inputs_in_micro_batch.keys())}")
-                # Print info about the lists inside the dict
-                for key, value_list in mm_inputs_in_micro_batch.items():
-                    print(f"DEBUG ACTOR FORWARD: Key '{key}' contains type: {type(value_list)}")
-                    if isinstance(value_list, list) and len(value_list) > 0:
-                        print(f"DEBUG ACTOR FORWARD:   List length: {len(value_list)}, Type of first item: {type(value_list[0])}")
-                        if isinstance(value_list[0], torch.Tensor):
-                                print(f"DEBUG ACTOR FORWARD:     Tensor shape: {value_list[0].shape}")
-                    elif isinstance(value_list, torch.Tensor):
-                        print(f"DEBUG ACTOR FORWARD:   It's a Tensor! Shape: {value_list.shape}")
+        response_length = micro_batch["responses"].size(-1)
+        multi_modal_inputs = {}
+        if "multi_modal_inputs" in micro_batch:
+            for key in micro_batch["multi_modal_inputs"][0].keys():
+                multi_modal_inputs[key] = torch.cat([inputs[key] for inputs in micro_batch["multi_modal_inputs"]], dim=0)
 
-            # ----> The problematic loop starts below <----
-            # It expects mm_inputs_in_micro_batch to be a list of dicts [{key: tensor}, ...]
-            try:
-                if isinstance(mm_inputs_in_micro_batch, list) and len(mm_inputs_in_micro_batch) > 0 and isinstance(mm_inputs_in_micro_batch[0], dict):
-                    print("DEBUG ACTOR FORWARD: Structure appears to be list-of-dicts. Proceeding with torch.cat loop.")
-                    for key in mm_inputs_in_micro_batch[0].keys():
-                        # Check if the items are actually tensors before cat
-                        tensors_to_cat = []
-                        valid_cat = True
-                        for inputs in mm_inputs_in_micro_batch:
-                            item = inputs.get(key)
-                            if isinstance(item, torch.Tensor):
-                                tensors_to_cat.append(item)
-                            else:
-                                print(f"ERROR ACTOR FORWARD: Expected Tensor for key '{key}' but got {type(item)}. Cannot torch.cat.")
-                                valid_cat = False
-                                break # Stop trying to cat this key
-
-                        if valid_cat and tensors_to_cat:
-                            try:
-                                multi_modal_inputs_processed[key] = torch.cat(tensors_to_cat, dim=0)
-                                print(f"DEBUG ACTOR FORWARD: Successfully concatenated key '{key}'. Result shape: {multi_modal_inputs_processed[key].shape}")
-                            except Exception as cat_err:
-                                print(f"ERROR ACTOR FORWARD: torch.cat failed for key '{key}': {cat_err}")
-                        elif not tensors_to_cat and valid_cat:
-                            print(f"WARN ACTOR FORWARD: No tensors found to concatenate for key '{key}'")
-
-                else:
-                    print(f"ERROR ACTOR FORWARD: micro_batch['multi_modal_inputs'] is not the expected list-of-dicts. Skipping processing.")
-
-            except Exception as loop_err:
-                print(f"ERROR ACTOR FORWARD: Error during mm_inputs processing loop: {loop_err}")
-                import traceback; traceback.print_exc()
-
-        # Make sure multi_modal_inputs used later is the processed one
-        multi_modal_inputs_arg = multi_modal_inputs_processed
-        
-
-        with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-            input_ids = micro_batch['input_ids']
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            input_ids = micro_batch["input_ids"]
             batch_size, seqlen = input_ids.shape
-            attention_mask = micro_batch['attention_mask']
-            position_ids = micro_batch['position_ids']
+            attention_mask = micro_batch["attention_mask"]
+            position_ids = micro_batch["position_ids"]
             entropy = None
             if position_ids.dim() == 3:  # qwen2vl mrope
                 position_ids = position_ids.transpose(0, 1)  # (bsz, 3, seqlen) -> (3, bsz, seqlen)
 
             if self.use_remove_padding:
-                input_ids_rmpad, indices, *_ = unpad_input(input_ids.unsqueeze(-1),
-                                                           attention_mask)  # input_ids_rmpad (total_nnz, ...)
+                input_ids_rmpad, indices, *_ = unpad_input(input_ids.unsqueeze(-1), attention_mask)  # input_ids_rmpad (total_nnz, ...)
                 input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # (1, total_nnz)
 
                 # unpad the position_ids to align the rotary
                 if position_ids.dim() == 3:
-                    position_ids_rmpad = index_first_axis(rearrange(position_ids, "c b s ... -> (b s) c ..."),
-                                                          indices).transpose(0, 1).unsqueeze(
-                                                              1)  # (3, bsz, seqlen) -> (3, 1, bsz * seqlen)
+                    position_ids_rmpad = index_first_axis(rearrange(position_ids, "c b s ... -> (b s) c ..."), indices).transpose(0, 1).unsqueeze(1)  # (3, bsz, seqlen) -> (3, 1, bsz * seqlen)
                 else:
-                    position_ids_rmpad = index_first_axis(rearrange(position_ids.unsqueeze(-1), "b s ... -> (b s) ..."),
-                                                          indices).transpose(0, 1)
+                    position_ids_rmpad = index_first_axis(rearrange(position_ids.unsqueeze(-1), "b s ... -> (b s) ..."), indices).transpose(0, 1)
 
                 # for compute the log_prob
                 input_ids_rmpad_rolled = torch.roll(input_ids_rmpad, shifts=-1, dims=1)  # (1, total_nnz)
 
                 # pad and slice the inputs if sp > 1
                 if self.use_ulysses_sp:
-                    input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad_and_slice_inputs(input_ids_rmpad, \
-                                                                                                position_ids_rmpad, \
-                                                                                                sp_size=self.ulysses_sequence_parallel_size)
-                    input_ids_rmpad_rolled, _, _ = ulysses_pad_and_slice_inputs(input_ids_rmpad_rolled, None,
-                                                                                self.ulysses_sequence_parallel_size)
+                    input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad_and_slice_inputs(input_ids_rmpad, position_ids_rmpad, sp_size=self.ulysses_sequence_parallel_size)
+                    input_ids_rmpad_rolled, _, _ = ulysses_pad_and_slice_inputs(input_ids_rmpad_rolled, None, self.ulysses_sequence_parallel_size)
 
                 input_ids_rmpad_rolled = input_ids_rmpad_rolled.squeeze(0)  # ((total_nnz / sp) + pad)
 
                 # only pass input_ids and position_ids to enable flash_attn_varlen
-                output = self.actor_module(input_ids=input_ids_rmpad,
-                                           attention_mask=None,
-                                           position_ids=position_ids_rmpad,
-                                           **multi_modal_inputs_arg,
-                                           use_cache=False)  # prevent model thinks we are generating
+                output = self.actor_module(
+                    input_ids=input_ids_rmpad,
+                    attention_mask=None,
+                    position_ids=position_ids_rmpad,
+                    **multi_modal_inputs,
+                    use_cache=False,
+                )  # prevent model thinks we are generating
                 logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
 
                 logits_rmpad.div_(temperature)
@@ -193,9 +303,7 @@ class DataParallelPPOActor(BasePPOActor):
                 inplace_backward = True
                 if calculate_entropy:
                     inplace_backward = False
-                log_probs = logprobs_from_logits(logits=logits_rmpad,
-                                                 labels=input_ids_rmpad_rolled,
-                                                 inplace_backward=inplace_backward)
+                log_probs = logprobs_from_logits(logits=logits_rmpad, labels=input_ids_rmpad_rolled, inplace_backward=inplace_backward)
 
                 # compute entropy
                 if calculate_entropy:
@@ -206,39 +314,31 @@ class DataParallelPPOActor(BasePPOActor):
                     # gather and unpad for the ulysses sp
                     log_probs = gather_outpus_and_unpad(log_probs, gather_dim=0, unpad_dim=0, padding_size=pad_size)
                     if calculate_entropy:
-                        entropy_rmpad = gather_outpus_and_unpad(entropy_rmpad,
-                                                                gather_dim=0,
-                                                                unpad_dim=0,
-                                                                padding_size=pad_size)
+                        entropy_rmpad = gather_outpus_and_unpad(entropy_rmpad, gather_dim=0, unpad_dim=0, padding_size=pad_size)
                 # pad back to (bsz, seqlen)
                 if calculate_entropy:
-                    full_entropy = pad_input(hidden_states=entropy_rmpad.unsqueeze(-1),
-                                             indices=indices,
-                                             batch=batch_size,
-                                             seqlen=seqlen)
-                full_log_probs = pad_input(hidden_states=log_probs.unsqueeze(-1),
-                                           indices=indices,
-                                           batch=batch_size,
-                                           seqlen=seqlen)
+                    full_entropy = pad_input(hidden_states=entropy_rmpad.unsqueeze(-1), indices=indices, batch=batch_size, seqlen=seqlen)
+                full_log_probs = pad_input(hidden_states=log_probs.unsqueeze(-1), indices=indices, batch=batch_size, seqlen=seqlen)
 
                 # only return response part:
                 if calculate_entropy:
-                    entropy = full_entropy.squeeze(-1)[:, -response_length - 1:-1]  # (bsz, response_length)
-                log_probs = full_log_probs.squeeze(-1)[:, -response_length - 1:-1]  # (bsz, response_length)
+                    entropy = full_entropy.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
+                log_probs = full_log_probs.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
 
             else:  # not using rmpad and no ulysses sp
-                output = self.actor_module(input_ids=input_ids,
-                                           attention_mask=attention_mask,
-                                           position_ids=position_ids,
-                                           **multi_modal_inputs_arg,
-                                           use_cache=False)  # prevent model thinks we are generating
+                output = self.actor_module(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    **multi_modal_inputs,
+                    use_cache=False,
+                )  # prevent model thinks we are generating
                 logits = output.logits
                 logits.div_(temperature)
-                logits = logits[:, -response_length - 1:-1, :]  # (bsz, response_length, vocab_size)
-                log_probs = logprobs_from_logits(logits, micro_batch['responses'])
+                logits = logits[:, -response_length - 1 : -1, :]  # (bsz, response_length, vocab_size)
+                log_probs = logprobs_from_logits(logits, micro_batch["responses"])
                 if calculate_entropy:
                     entropy = verl_F.entropy_from_logits(logits)  # (bsz, response_length)
-                    
 
             return entropy, log_probs
 
@@ -342,7 +442,7 @@ class DataParallelPPOActor(BasePPOActor):
 
         temperature = data.meta_info['temperature']  # temperature must be in the data.meta_info to avoid slient error
 
-        select_keys = ['responses', 'input_ids', 'attention_mask', 'position_ids', 'old_log_probs', 'advantages']
+        select_keys = ['responses', 'input_ids', 'attention_mask', 'position_ids', 'old_log_probs', 'advantages', 'response_mask']
         if self.config.use_kl_loss:
             select_keys.append('ref_log_prob')
         batch = data.select(batch_keys=select_keys).batch

@@ -177,14 +177,12 @@ class TaskRunner:
         )
         
         from verl.workers.reward_manager import VQACombinedRewardManager
-        grounding_weight = config.reward_model.get("grounding_weight", 0.5)
-        qa_weight = config.reward_model.get("qa_weight", 0.5)
+        from verl.workers.reward_manager import VQAMultiStageRewardManager
+        grounding_weight = config.reward_model.get("grounding_weight", 0.4)
+        qa_weight = config.reward_model.get("qa_weight", 0.4)
         num_examine = config.reward_model.get("num_examine", 1) # Example
-        vqa_reward_fn = VQACombinedRewardManager(
-            tokenizer=tokenizer,
-            grounding_weight=grounding_weight,
-            qa_weight=qa_weight,
-            num_examine=num_examine
+        vqa_reward_fn = VQAMultiStageRewardManager(
+            tokenizer=tokenizer
         )
         
         compute_score = get_custom_reward_fn(config)

@@ -158,80 +158,166 @@ def fetch_image(ele: dict[str, str | Image.Image], size_factor: int = IMAGE_FACT
 
     return image
 
-
-def smart_nframes(
+def smart_nframes( # Using the revised logic from before, with print for debug
     ele: dict,
-    total_frames: int,
+    total_frames: int, 
     video_fps: int | float,
 ) -> int:
-    """
-    Calculates the target number of frames for video used for model inputs.
-    Prioritizes 'nframes' if specified and valid, otherwise uses 'fps'.
-    """
-    # assert not ("fps" in ele and "nframes" in ele), "Only accept either `fps` or `nframes`" # REMOVED ASSERTION
+    item_original_idx = ele.get("original_idx", "N/A_smart_nframes_revised") 
+    # print(f"[smart_nframes_revised item_idx:{item_original_idx}] INPUTS --- ele_config: {ele}, total_frames_of_segment: {total_frames}, segment_video_fps: {video_fps}")
 
-    target_nframes = 0 # Initialize
+    final_nframes = 0
 
-    # --- Prioritize 'nframes' if provided and not None ---
+    if total_frames <= 0:
+        # print(f"[smart_nframes_revised item_idx:{item_original_idx}] Input segment total_frames is {total_frames}. Returning 0 frames.")
+        return 0
+
     if "nframes" in ele and ele["nframes"] is not None:
         try:
             requested_nframes = int(ele["nframes"])
-            target_nframes = round_by_factor(requested_nframes, FRAME_FACTOR)
-            logger.debug(f"smart_nframes: Using 'nframes' config: {requested_nframes} -> rounded {target_nframes}")
-
-            # Apply min/max constraints directly to nframes
-            min_frames_nf = ceil_by_factor(ele.get("min_frames", FPS_MIN_FRAMES), FRAME_FACTOR)
-            max_frames_nf_config = ele.get("max_frames", FPS_MAX_FRAMES)
-            # Ensure max_frames constraint doesn't exceed available total_frames
-            # Handle total_frames=0 case
-            max_frames_nf = floor_by_factor(min(max_frames_nf_config, total_frames), FRAME_FACTOR) if total_frames > 0 else 0
-
-            target_nframes = min(max(target_nframes, min_frames_nf), max_frames_nf) if total_frames > 0 else 0
-            logger.debug(f"smart_nframes: Clamped 'nframes' to {target_nframes} based on min/max/total ({min_frames_nf}/{max_frames_nf}/{total_frames})")
-
+            nframes_from_config = round_by_factor(requested_nframes, FRAME_FACTOR)
+            nframes_from_config = max(nframes_from_config, FRAME_FACTOR) 
+            final_nframes = min(nframes_from_config, floor_by_factor(total_frames, FRAME_FACTOR)) 
+            if total_frames < FRAME_FACTOR:
+                 final_nframes = total_frames 
+            else: 
+                 final_nframes = max(final_nframes, FRAME_FACTOR)
+            # print(f"[smart_nframes_revised item_idx:{item_original_idx}] 'nframes' path: requested={requested_nframes}, processed_to_final_nframes={final_nframes}")
         except (ValueError, TypeError) as e:
-            logger.warning(f"smart_nframes: Invalid 'nframes' value ({ele['nframes']}): {e}. Falling back to FPS calculation.")
-            target_nframes = 0 # Reset to trigger FPS calculation
+            print(f"[smart_nframes_revised item_idx:{item_original_idx}] Invalid 'nframes' value ({ele['nframes']}): {e}. Will attempt FPS path.")
+            final_nframes = 0 
 
-    # --- Use 'fps' if 'nframes' was not prioritized or was invalid ---
-    if target_nframes == 0 and total_frames > 0: # Only calculate if needed and possible
-        fps = ele.get("fps", FPS) # Use configured fps or default
-        min_frames = ceil_by_factor(ele.get("min_frames", FPS_MIN_FRAMES), FRAME_FACTOR)
-        max_frames_config = ele.get("max_frames", FPS_MAX_FRAMES)
-        max_frames = floor_by_factor(min(max_frames_config, total_frames), FRAME_FACTOR)
-        logger.debug(f"smart_nframes: Using 'fps' config: {fps} (min: {min_frames}, max: {max_frames}, total: {total_frames})")
+    if not ("nframes" in ele and ele["nframes"] is not None and final_nframes > 0) : 
+        config_fps = ele.get("fps", FPS) 
+        min_frames_from_config = ceil_by_factor(ele.get("min_frames", FPS_MIN_FRAMES), FRAME_FACTOR)
+        effective_min_frames = min(min_frames_from_config, floor_by_factor(total_frames, FRAME_FACTOR))
+        if total_frames < FRAME_FACTOR : 
+            effective_min_frames = total_frames
+        elif total_frames < effective_min_frames: 
+            effective_min_frames = floor_by_factor(total_frames, FRAME_FACTOR)
 
-        if video_fps > 1e-6: # Check for valid video_fps before division
-            calculated_nframes = total_frames / video_fps * fps
+        max_frames_from_config = floor_by_factor(ele.get("max_frames", FPS_MAX_FRAMES), FRAME_FACTOR)
+        effective_max_frames = min(max_frames_from_config, floor_by_factor(total_frames, FRAME_FACTOR))
+        effective_max_frames = max(effective_max_frames, effective_min_frames) 
+
+        # print(f"[smart_nframes_revised item_idx:{item_original_idx}] 'fps' path --- config_fps: {config_fps}, "
+        #              f"effective_min_frames: {effective_min_frames}, effective_max_frames: {effective_max_frames}")
+
+        calculated_nframes_raw = 0.0
+        if video_fps > 1e-6:
+            calculated_nframes_raw = (total_frames / video_fps) * config_fps
         else:
-            logger.warning(f"smart_nframes: video_fps is {video_fps:.2f}. Cannot use fps config. Using min_frames={min_frames}.")
-            calculated_nframes = min_frames
+            logger.warning(f"[smart_nframes_revised item_idx:{item_original_idx}] Segment video_fps is {video_fps:.2f}. Cannot reliably use fps config. Defaulting towards effective_min_frames.")
+            calculated_nframes_raw = float(effective_min_frames)
 
-        # Apply constraints
-        if calculated_nframes > total_frames:
-            logger.warning(f"smart_nframes: Calculated nframes[{calculated_nframes:.2f}] > total_frames[{total_frames}]. Clamping.")
+        # print(f"[smart_nframes_revised item_idx:{item_original_idx}] 'fps' path: calculated_nframes_raw: {calculated_nframes_raw:.2f}")
+        
+        nframes_clamped = max(calculated_nframes_raw, float(effective_min_frames))
+        nframes_clamped = min(nframes_clamped, float(effective_max_frames))
+        
+        final_nframes = floor_by_factor(nframes_clamped, FRAME_FACTOR)
+        
+        if total_frames > 0 and final_nframes == 0:
+            final_nframes = total_frames 
+            # print(f"[smart_nframes_revised item_idx:{item_original_idx}] 'fps' path: Adjusted final_nframes to {final_nframes} because it was 0 but total_frames > 0.")
+        elif final_nframes < FRAME_FACTOR and total_frames >= FRAME_FACTOR:
+            final_nframes = FRAME_FACTOR 
+            # print(f"[smart_nframes_revised item_idx:{item_original_idx}] 'fps' path: Adjusted final_nframes to FRAME_FACTOR ({final_nframes})")
 
-        target_nframes = min(min(max(calculated_nframes, min_frames), max_frames), total_frames)
-        target_nframes = floor_by_factor(target_nframes, FRAME_FACTOR) # Ensure divisible by factor
+        # print(f"[smart_nframes_revised item_idx:{item_original_idx}] 'fps' path: After clamping and floor_by_factor: final_nframes={final_nframes}")
 
-    # --- Final Validation and Clamping ---
-    # Ensure at least FRAME_FACTOR frames unless total_frames is smaller, handle total_frames=0
-    if total_frames == 0:
-        target_nframes = 0
-    else:
-        min_possible_frames = FRAME_FACTOR if total_frames >= FRAME_FACTOR else max(1, total_frames) # At least 1 frame
-        target_nframes = max(min_possible_frames, int(round(target_nframes)))
-        # Ensure not more than total_frames
-        target_nframes = min(target_nframes, total_frames)
+    if total_frames > 0 : 
+        expected_min = FRAME_FACTOR if total_frames >= FRAME_FACTOR else total_frames
+        expected_max = total_frames
+        if not (expected_min <= final_nframes <= expected_max):
+            # Using print for this critical error/correction message
+            # print(f"[smart_nframes_revised ERROR item_idx:{item_original_idx}] Post-calculation sanity check failed! "
+            #              f"final_nframes ({final_nframes}) is not in expected interval [{expected_min}, {expected_max}]. "
+            #              f"Original total_frames: {total_frames}. This indicates a logic flaw.")
+            if final_nframes < expected_min : final_nframes = expected_min
+            if final_nframes > expected_max : final_nframes = expected_max
+            # print(f"[smart_nframes_revised CORRECTION item_idx:{item_original_idx}] Corrected final_nframes to: {final_nframes}")
+            # The original code would raise ValueError here. This version prints an error and corrects.
+            # If you want to keep the exact original behavior (crashing), uncomment the raise:
+            # raise ValueError(f"nframes should in interval [{expected_min}, {expected_max}], but got {final_nframes}. Original total: {total_frames}")
+
+    # print(f"[smart_nframes_revised item_idx:{item_original_idx}] FINAL nframes to be returned: {final_nframes} (from segment with total_frames: {total_frames})")
+    return int(round(final_nframes))
 
 
-    logger.debug(f"smart_nframes: Final target frames = {target_nframes}")
+# def smart_nframes(
+#     ele: dict,
+#     total_frames: int,
+#     video_fps: int | float,
+# ) -> int:
+#     """
+#     Calculates the target number of frames for video used for model inputs.
+#     Prioritizes 'nframes' if specified and valid, otherwise uses 'fps'.
+#     """
+#     # assert not ("fps" in ele and "nframes" in ele), "Only accept either `fps` or `nframes`" # REMOVED ASSERTION
 
-    # Final check (optional logging)
-    # if total_frames > 0 and not (min_possible_frames <= target_nframes <= total_frames):
-    #    logger.error(f"Post-calculation check failed: target={target_nframes}, min_poss={min_possible_frames}, total={total_frames}")
+#     target_nframes = 0 # Initialize
 
-    return target_nframes
+#     # --- Prioritize 'nframes' if provided and not None ---
+#     if "nframes" in ele and ele["nframes"] is not None:
+#         try:
+#             requested_nframes = int(ele["nframes"])
+#             target_nframes = round_by_factor(requested_nframes, FRAME_FACTOR)
+#             logger.debug(f"smart_nframes: Using 'nframes' config: {requested_nframes} -> rounded {target_nframes}")
+
+#             # Apply min/max constraints directly to nframes
+#             min_frames_nf = ceil_by_factor(ele.get("min_frames", FPS_MIN_FRAMES), FRAME_FACTOR)
+#             max_frames_nf_config = ele.get("max_frames", FPS_MAX_FRAMES)
+#             # Ensure max_frames constraint doesn't exceed available total_frames
+#             # Handle total_frames=0 case
+#             max_frames_nf = floor_by_factor(min(max_frames_nf_config, total_frames), FRAME_FACTOR) if total_frames > 0 else 0
+
+#             target_nframes = min(max(target_nframes, min_frames_nf), max_frames_nf) if total_frames > 0 else 0
+#             logger.debug(f"smart_nframes: Clamped 'nframes' to {target_nframes} based on min/max/total ({min_frames_nf}/{max_frames_nf}/{total_frames})")
+
+#         except (ValueError, TypeError) as e:
+#             logger.warning(f"smart_nframes: Invalid 'nframes' value ({ele['nframes']}): {e}. Falling back to FPS calculation.")
+#             target_nframes = 0 # Reset to trigger FPS calculation
+
+#     # --- Use 'fps' if 'nframes' was not prioritized or was invalid ---
+#     if target_nframes == 0 and total_frames > 0: # Only calculate if needed and possible
+#         fps = ele.get("fps", FPS) # Use configured fps or default
+#         min_frames = ceil_by_factor(ele.get("min_frames", FPS_MIN_FRAMES), FRAME_FACTOR)
+#         max_frames_config = ele.get("max_frames", FPS_MAX_FRAMES)
+#         max_frames = floor_by_factor(min(max_frames_config, total_frames), FRAME_FACTOR)
+#         logger.debug(f"smart_nframes: Using 'fps' config: {fps} (min: {min_frames}, max: {max_frames}, total: {total_frames})")
+
+#         if video_fps > 1e-6: # Check for valid video_fps before division
+#             calculated_nframes = total_frames / video_fps * fps
+#         else:
+#             logger.warning(f"smart_nframes: video_fps is {video_fps:.2f}. Cannot use fps config. Using min_frames={min_frames}.")
+#             calculated_nframes = min_frames
+
+#         # Apply constraints
+#         if calculated_nframes > total_frames:
+#             logger.warning(f"smart_nframes: Calculated nframes[{calculated_nframes:.2f}] > total_frames[{total_frames}]. Clamping.")
+
+#         target_nframes = min(min(max(calculated_nframes, min_frames), max_frames), total_frames)
+#         target_nframes = floor_by_factor(target_nframes, FRAME_FACTOR) # Ensure divisible by factor
+
+#     # --- Final Validation and Clamping ---
+#     # Ensure at least FRAME_FACTOR frames unless total_frames is smaller, handle total_frames=0
+#     if total_frames == 0:
+#         target_nframes = 0
+#     else:
+#         min_possible_frames = FRAME_FACTOR if total_frames >= FRAME_FACTOR else max(1, total_frames) # At least 1 frame
+#         target_nframes = max(min_possible_frames, int(round(target_nframes)))
+#         # Ensure not more than total_frames
+#         target_nframes = min(target_nframes, total_frames)
+
+
+#     logger.debug(f"smart_nframes: Final target frames = {target_nframes}")
+
+#     # Final check (optional logging)
+#     # if total_frames > 0 and not (min_possible_frames <= target_nframes <= total_frames):
+#     #    logger.error(f"Post-calculation check failed: target={target_nframes}, min_poss={min_possible_frames}, total={total_frames}")
+
+#     return target_nframes
 
 def _read_video_torchvision(
     ele: dict,
@@ -333,7 +419,7 @@ def fetch_video(ele: dict, image_factor: int = IMAGE_FACTOR, return_video_sample
         try:
             video, sample_fps = VIDEO_READER_BACKENDS[video_reader_backend](ele)
         except Exception as e:
-            logger.warning(f"video_reader_backend {video_reader_backend} error, use torchvision as default, msg: {e}")
+            # logger.warning(f"video_reader_backend {video_reader_backend} error, use torchvision as default, msg: {e}")
             video, sample_fps = VIDEO_READER_BACKENDS["torchvision"](ele)
 
         nframes, _, height, width = video.shape
@@ -502,8 +588,8 @@ class TwoStageVideoQADataset(Dataset):
         self.video_id_key = config.get("video_id_key", "video_id")
         self.temproal_key = config.get("temporal_key", "temporal_grounding") # Optional, for Stage 2
         # Video file parameters
-        # self.video_base_path = config.get("video_base_path", '/home/chendong/video-rl/charades_sta/Charades_v1_480')
-        self.video_base_path = config.get("video_base_path", '/dev/shm/.cache/huggingface/datasets/charades_sta/Charades_v1_480')
+        self.video_base_path = config.get("video_base_path", '/home/chendong/video-rl/charades_sta/Charades_v1_480')
+        # self.video_base_path = config.get("video_base_path", '/dev/shm/.cache/huggingface/datasets/charades_sta/Charades_v1_480')
         if not self.video_base_path or not os.path.isdir(self.video_base_path):
              raise ValueError(f"`video_base_path` ('{self.video_base_path}') must be specified and exist.")
         self.video_extension = config.get("video_extension", ".mp4")
@@ -631,7 +717,9 @@ class TwoStageVideoQADataset(Dataset):
             full_video_frames_tensor = None
             try:
                 # Use fetch_video to get processed tensor TCHW for the *whole* video
-                full_video_frames_tensor = fetch_video(ele_full_video, image_factor=self.video_processing_config["image_factor"])
+                full_video_frames_tensor= fetch_video(ele_full_video, image_factor=self.video_processing_config["image_factor"])
+                # print(f"Video {video_path} loaded with shape: {full_video_frames_tensor.shape}")
+                # exit(0)
             except Exception as e:
                  logger.error(f"Error processing FULL video for item {item} ({video_path}): {e}", exc_info=True)
                  return None
@@ -669,13 +757,24 @@ class TwoStageVideoQADataset(Dataset):
                 stage1_model_inputs_remaining = dict(stage1_model_inputs) # Keep remaining (e.g., grid info)
                 if hasattr(self.processor, 'image_processor') and \
                    self.processor.image_processor.__class__.__name__ == "Qwen2VLImageProcessor":
+                    #  print("Qwen2VLImageProcessor detected. Using custom position ID calculation.")
                      try:
                          from verl.models.transformers.qwen2_vl import get_rope_index
-                         s1_pos_ids_list = [ get_rope_index(self.processor, input_ids=stage1_input_ids[0], **stage1_model_inputs_remaining, attention_mask=stage1_attention_mask[0]) ]
+                         s1_pos_ids_list = [
+                            get_rope_index(
+                                self.processor,
+                                input_ids=stage1_input_ids[0],
+                                image_grid_thw=stage1_model_inputs.get("image_grid_thw"),
+                                video_grid_thw=stage1_model_inputs.get("video_grid_thw"),
+                                second_per_grid_ts=stage1_model_inputs.get("second_per_grid_ts"),
+                                attention_mask=stage1_attention_mask[0],
+                            )
+                        ]  # (1, 3, seq_len)
                          stage1_position_ids = s1_pos_ids_list[0]
                      except ImportError: position_ids = compute_position_id_with_mask(stage1_attention_mask)[0]; logger.warning("Qwen func not found.") # Basic fallback
                      except KeyError as ke: position_ids = compute_position_id_with_mask(stage1_attention_mask)[0]; logger.warning(f"KeyError Qwen pos ID: {ke}") # Basic fallback
                 else:
+                    #  print("Using default position ID calculation.")
                      stage1_position_ids = compute_position_id_with_mask(stage1_attention_mask)[0]
 
             except RuntimeError as trunc_err:
@@ -705,6 +804,7 @@ class TwoStageVideoQADataset(Dataset):
                 # == Other Useful Info ==
                 "video_id": video_id,
                 "action_text": action_text,                     # Original action text
+                "original_video_nframes": full_video_frames_tensor.shape[0], # Original number of frames
             }
 
             # Add Optional Logging Keys If Configured (for standard fit loop logging)

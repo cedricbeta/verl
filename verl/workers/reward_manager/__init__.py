@@ -18,3 +18,4 @@ from .batch import BatchRewardManager
 from .dapo import DAPORewardManager
 from .video import TVGRewardManager
 from .vqa import VQACombinedRewardManager
+from .vqa_ms import VQAMultiStageRewardManager
