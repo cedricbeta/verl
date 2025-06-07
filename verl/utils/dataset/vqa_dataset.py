@@ -200,8 +200,8 @@ def smart_nframes( # Using the revised logic from before, with print for debug
         effective_max_frames = min(max_frames_from_config, floor_by_factor(total_frames, FRAME_FACTOR))
         effective_max_frames = max(effective_max_frames, effective_min_frames) 
 
-        # print(f"[smart_nframes_revised item_idx:{item_original_idx}] 'fps' path --- config_fps: {config_fps}, "
-        #              f"effective_min_frames: {effective_min_frames}, effective_max_frames: {effective_max_frames}")
+        print(f"[smart_nframes_revised item_idx:{item_original_idx}] 'fps' path --- config_fps: {config_fps}, "
+                     f"effective_min_frames: {effective_min_frames}, effective_max_frames: {effective_max_frames}")
 
         calculated_nframes_raw = 0.0
         if video_fps > 1e-6:
@@ -210,7 +210,7 @@ def smart_nframes( # Using the revised logic from before, with print for debug
             logger.warning(f"[smart_nframes_revised item_idx:{item_original_idx}] Segment video_fps is {video_fps:.2f}. Cannot reliably use fps config. Defaulting towards effective_min_frames.")
             calculated_nframes_raw = float(effective_min_frames)
 
-        # print(f"[smart_nframes_revised item_idx:{item_original_idx}] 'fps' path: calculated_nframes_raw: {calculated_nframes_raw:.2f}")
+        print(f"[smart_nframes_revised item_idx:{item_original_idx}] 'fps' path: calculated_nframes_raw: {calculated_nframes_raw:.2f}")
         
         nframes_clamped = max(calculated_nframes_raw, float(effective_min_frames))
         nframes_clamped = min(nframes_clamped, float(effective_max_frames))
@@ -219,12 +219,12 @@ def smart_nframes( # Using the revised logic from before, with print for debug
         
         if total_frames > 0 and final_nframes == 0:
             final_nframes = total_frames 
-            # print(f"[smart_nframes_revised item_idx:{item_original_idx}] 'fps' path: Adjusted final_nframes to {final_nframes} because it was 0 but total_frames > 0.")
+            print(f"[smart_nframes_revised item_idx:{item_original_idx}] 'fps' path: Adjusted final_nframes to {final_nframes} because it was 0 but total_frames > 0.")
         elif final_nframes < FRAME_FACTOR and total_frames >= FRAME_FACTOR:
             final_nframes = FRAME_FACTOR 
-            # print(f"[smart_nframes_revised item_idx:{item_original_idx}] 'fps' path: Adjusted final_nframes to FRAME_FACTOR ({final_nframes})")
+            print(f"[smart_nframes_revised item_idx:{item_original_idx}] 'fps' path: Adjusted final_nframes to FRAME_FACTOR ({final_nframes})")
 
-        # print(f"[smart_nframes_revised item_idx:{item_original_idx}] 'fps' path: After clamping and floor_by_factor: final_nframes={final_nframes}")
+        print(f"[smart_nframes_revised item_idx:{item_original_idx}] 'fps' path: After clamping and floor_by_factor: final_nframes={final_nframes}")
 
     if total_frames > 0 : 
         expected_min = FRAME_FACTOR if total_frames >= FRAME_FACTOR else total_frames
@@ -245,79 +245,6 @@ def smart_nframes( # Using the revised logic from before, with print for debug
     return int(round(final_nframes))
 
 
-# def smart_nframes(
-#     ele: dict,
-#     total_frames: int,
-#     video_fps: int | float,
-# ) -> int:
-#     """
-#     Calculates the target number of frames for video used for model inputs.
-#     Prioritizes 'nframes' if specified and valid, otherwise uses 'fps'.
-#     """
-#     # assert not ("fps" in ele and "nframes" in ele), "Only accept either `fps` or `nframes`" # REMOVED ASSERTION
-
-#     target_nframes = 0 # Initialize
-
-#     # --- Prioritize 'nframes' if provided and not None ---
-#     if "nframes" in ele and ele["nframes"] is not None:
-#         try:
-#             requested_nframes = int(ele["nframes"])
-#             target_nframes = round_by_factor(requested_nframes, FRAME_FACTOR)
-#             logger.debug(f"smart_nframes: Using 'nframes' config: {requested_nframes} -> rounded {target_nframes}")
-
-#             # Apply min/max constraints directly to nframes
-#             min_frames_nf = ceil_by_factor(ele.get("min_frames", FPS_MIN_FRAMES), FRAME_FACTOR)
-#             max_frames_nf_config = ele.get("max_frames", FPS_MAX_FRAMES)
-#             # Ensure max_frames constraint doesn't exceed available total_frames
-#             # Handle total_frames=0 case
-#             max_frames_nf = floor_by_factor(min(max_frames_nf_config, total_frames), FRAME_FACTOR) if total_frames > 0 else 0
-
-#             target_nframes = min(max(target_nframes, min_frames_nf), max_frames_nf) if total_frames > 0 else 0
-#             logger.debug(f"smart_nframes: Clamped 'nframes' to {target_nframes} based on min/max/total ({min_frames_nf}/{max_frames_nf}/{total_frames})")
-
-#         except (ValueError, TypeError) as e:
-#             logger.warning(f"smart_nframes: Invalid 'nframes' value ({ele['nframes']}): {e}. Falling back to FPS calculation.")
-#             target_nframes = 0 # Reset to trigger FPS calculation
-
-#     # --- Use 'fps' if 'nframes' was not prioritized or was invalid ---
-#     if target_nframes == 0 and total_frames > 0: # Only calculate if needed and possible
-#         fps = ele.get("fps", FPS) # Use configured fps or default
-#         min_frames = ceil_by_factor(ele.get("min_frames", FPS_MIN_FRAMES), FRAME_FACTOR)
-#         max_frames_config = ele.get("max_frames", FPS_MAX_FRAMES)
-#         max_frames = floor_by_factor(min(max_frames_config, total_frames), FRAME_FACTOR)
-#         logger.debug(f"smart_nframes: Using 'fps' config: {fps} (min: {min_frames}, max: {max_frames}, total: {total_frames})")
-
-#         if video_fps > 1e-6: # Check for valid video_fps before division
-#             calculated_nframes = total_frames / video_fps * fps
-#         else:
-#             logger.warning(f"smart_nframes: video_fps is {video_fps:.2f}. Cannot use fps config. Using min_frames={min_frames}.")
-#             calculated_nframes = min_frames
-
-#         # Apply constraints
-#         if calculated_nframes > total_frames:
-#             logger.warning(f"smart_nframes: Calculated nframes[{calculated_nframes:.2f}] > total_frames[{total_frames}]. Clamping.")
-
-#         target_nframes = min(min(max(calculated_nframes, min_frames), max_frames), total_frames)
-#         target_nframes = floor_by_factor(target_nframes, FRAME_FACTOR) # Ensure divisible by factor
-
-#     # --- Final Validation and Clamping ---
-#     # Ensure at least FRAME_FACTOR frames unless total_frames is smaller, handle total_frames=0
-#     if total_frames == 0:
-#         target_nframes = 0
-#     else:
-#         min_possible_frames = FRAME_FACTOR if total_frames >= FRAME_FACTOR else max(1, total_frames) # At least 1 frame
-#         target_nframes = max(min_possible_frames, int(round(target_nframes)))
-#         # Ensure not more than total_frames
-#         target_nframes = min(target_nframes, total_frames)
-
-
-#     logger.debug(f"smart_nframes: Final target frames = {target_nframes}")
-
-#     # Final check (optional logging)
-#     # if total_frames > 0 and not (min_possible_frames <= target_nframes <= total_frames):
-#     #    logger.error(f"Post-calculation check failed: target={target_nframes}, min_poss={min_possible_frames}, total={total_frames}")
-
-#     return target_nframes
 
 def _read_video_torchvision(
     ele: dict,
@@ -340,6 +267,7 @@ def _read_video_torchvision(
         if "file://" in video_path:
             video_path = video_path[7:]
     st = time.time()
+    print(f"torchvision:  reading video {video_path} with start_pts={ele.get('video_start', 0.0)} and end_pts={ele.get('video_end', None)}")
     video, audio, info = io.read_video(
         video_path,
         start_pts=ele.get("video_start", 0.0),
@@ -350,6 +278,7 @@ def _read_video_torchvision(
     total_frames, video_fps = video.size(0), info["video_fps"]
     logger.info(f"torchvision:  {video_path=}, {total_frames=}, {video_fps=}, time={time.time() - st:.3f}s")
     nframes = smart_nframes(ele, total_frames=total_frames, video_fps=video_fps)
+    logger.info(f"torchvision:  {video_path=}, {nframes=}, {total_frames=}, {video_fps=}")
     idx = torch.linspace(0, total_frames - 1, nframes).round().long()
     sample_fps = nframes / max(total_frames, 1e-6) * video_fps
     video = video[idx]
@@ -386,6 +315,7 @@ def _read_video_decord(
     total_frames, video_fps = len(vr), vr.get_avg_fps()
     logger.info(f"decord:  {video_path=}, {total_frames=}, {video_fps=}, time={time.time() - st:.3f}s")
     nframes = smart_nframes(ele, total_frames=total_frames, video_fps=video_fps)
+    logger.info(f"decord:  {video_path=}, {nframes=}, {total_frames=}, {video_fps=}")
     idx = torch.linspace(0, total_frames - 1, nframes).round().long().tolist()
     video = vr.get_batch(idx).asnumpy()
     video = torch.tensor(video).permute(0, 3, 1, 2)  # Convert to TCHW format
@@ -423,6 +353,7 @@ def fetch_video(ele: dict, image_factor: int = IMAGE_FACTOR, return_video_sample
             video, sample_fps = VIDEO_READER_BACKENDS["torchvision"](ele)
 
         nframes, _, height, width = video.shape
+        print(f"fetch_video: {ele['video']}, nframes={nframes}, sample_fps={sample_fps}, height={height}, width={width}")
         min_pixels = ele.get("min_pixels", VIDEO_MIN_PIXELS)
         total_pixels = ele.get("total_pixels", VIDEO_TOTAL_PIXELS)
         max_pixels = max(min(VIDEO_MAX_PIXELS, total_pixels / nframes * FRAME_FACTOR), int(min_pixels * 1.05))
@@ -525,41 +456,54 @@ from typing import Union, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# --- Include the robust collate_fn here ---
-# (See previous responses for the full collate_fn code that handles None, np arrays)
 def collate_fn(data_list: list[dict]) -> dict:
+    """
+    Collate function that matches the official implementation pattern.
+    Handles multi_modal_inputs specially to preserve dict structure.
+    """
     tensors = defaultdict(list)
     non_tensors = defaultdict(list)
+    
     valid_data_list = [data for data in data_list if data is not None]
-    if not valid_data_list: return {}
-    # --- Batching Logic (handle tensors, np arrays, others) ---
+    if not valid_data_list: 
+        return {}
+    
+    # First pass: collect all data
     for data in valid_data_list:
         for key, val in data.items():
-            if isinstance(val, torch.Tensor): tensors[key].append(val)
-            elif isinstance(val, np.ndarray): non_tensors[key].append(val) # Keep as list of arrays for now
-            else: non_tensors[key].append(val)
+            if isinstance(val, torch.Tensor):
+                tensors[key].append(val)
+            else:
+                non_tensors[key].append(val)
+    
+    # Second pass: stack tensors
     for key, val in tensors.items():
-        try: tensors[key] = torch.stack(val, dim=0)
+        try:
+            tensors[key] = torch.stack(val, dim=0)
         except Exception as e:
-            logger.warning(f"Collate: Error stacking tensor key '{key}': {e}. Keeping as list in non_tensors.")
-            if key not in non_tensors: non_tensors[key] = []
-            non_tensors[key].extend(val) # Add elements to non_tensors list
-    for key, val in list(tensors.items()): # Iterate over copy if removing items
-        if key in non_tensors: del tensors[key] # Remove key if moved
+            logger.warning(f"Collate: Error stacking tensor key '{key}': {e}. Moving to non_tensors.")
+            non_tensors[key] = val  # Keep as list if can't stack
+            del tensors[key]
+    
+    # Third pass: convert non-tensors to numpy arrays
     for key, val in non_tensors.items():
-        if isinstance(val, list) and all(isinstance(elem, np.ndarray) for elem in val): non_tensors[key] = val # Keep list of np arrays
+        # Special handling for multi_modal_inputs to preserve dict structure
+        if key == 'multi_modal_inputs':
+            # This should be a list of dicts, convert to numpy array of objects
+            non_tensors[key] = np.array(val, dtype=object)
         else:
-             try:
-                 if not (isinstance(val, list) and all(isinstance(elem, np.ndarray) for elem in val)):
-                     # Only convert if not already list of arrays
-                     non_tensors[key] = np.array(val, dtype=object)
-             except Exception as e:
-                 logger.warning(f"Collate: Could not convert key '{key}' to numpy object array: {e}. Keeping as list.")
-                 non_tensors[key] = val # Keep as list if conversion fails
-    final_batch = {}; final_batch.update(non_tensors); final_batch.update(tensors)
+            try:
+                non_tensors[key] = np.array(val, dtype=object)
+            except Exception as e:
+                logger.warning(f"Collate: Could not convert key '{key}' to numpy array: {e}")
+                non_tensors[key] = val  # Keep as list
+    
+    # Combine tensors and non-tensors
+    final_batch = {}
+    final_batch.update(tensors)
+    final_batch.update(non_tensors)
+    
     return final_batch
-# --- End collate_fn ---
-
 
 class TwoStageVideoQADataset(Dataset):
     """
@@ -594,7 +538,7 @@ class TwoStageVideoQADataset(Dataset):
              raise ValueError(f"`video_base_path` ('{self.video_base_path}') must be specified and exist.")
         self.video_extension = config.get("video_extension", ".mp4")
         # Prompting and processing parameters
-        self.grounding_prompt_template = config.get("grounding_prompt_template", "<video> Find the start and end time for the action: {}")
+        self.grounding_prompt_template = config.get("grounding_prompt_template", "Find the start and end time for the action: {}")
         self.qa_prompt_prefix = config.get("qa_prompt_prefix", "<video> ") # Prefix only for QA prompt
         self.max_prompt_length = config.get("max_prompt_length", 1024) # Max length for Stage 1 tokenized input
         self.system_prompt = config.get("system_prompt", None) # Applied to both stages if present
@@ -647,12 +591,12 @@ class TwoStageVideoQADataset(Dataset):
             elif data_file_path.endswith(".jsonl"): file_type = "json"
             else: logger.warning(f"Skipping unsupported file: {data_file_path}"); continue
             try:
-                logger.info(f"Loading dataset: {data_file_path}")
+                print(f"Loading dataset: {data_file_path}")
                 dataframe = datasets.load_dataset(file_type, data_files=data_file_path)["train"]
                 # Check keys needed for this dataset structure
                 required_keys = [self.action_key, self.question_key, self.answer_key, self.video_id_key]
                 missing_keys = [k for k in required_keys if k not in dataframe.column_names]
-                if missing_keys: logger.error(f"File {data_file_path} missing keys: {missing_keys}. Skipping."); continue
+                if missing_keys: print(f"File {data_file_path} missing keys: {missing_keys}. Skipping."); continue
                 dataframes.append(dataframe)
             except Exception as e: logger.error(f"Error loading {data_file_path}: {e}")
         if not dataframes: raise ValueError("No dataframes loaded.")
@@ -728,61 +672,145 @@ class TwoStageVideoQADataset(Dataset):
                  return None
 
             # --- 4. Prepare Stage 1 Tokenized Inputs (Grounding Prompt + Full Video) ---
+            # stage1_messages = []
+            # if self.system_prompt:
+            #     stage1_messages.append({"role": "system", "content": self.system_prompt})
+            # # Format grounding prompt using template and action text
+            # grounding_user_content = self.grounding_prompt_template.format(action_text)
+            # stage1_messages.append({"role": "user", "content": grounding_user_content})
+
+            # stage1_input_ids, stage1_attention_mask, stage1_position_ids = None, None, None
+            # stage1_model_inputs_remaining = {}
+            # try:
+            #     # Tokenize Stage 1 prompt WITH full video features
+            #     stage1_raw_prompt = self.processor.apply_chat_template(stage1_messages, add_generation_prompt=True, tokenize=False)
+            #     stage1_model_inputs = self.processor(text=[stage1_raw_prompt], images=None, videos=[full_video_frames_tensor], return_tensors="pt")
+
+            #     if "input_ids" not in stage1_model_inputs or "attention_mask" not in stage1_model_inputs:
+            #          raise ValueError("Processor output missing keys for Stage 1")
+            #     s1_input_ids_raw = stage1_model_inputs.pop("input_ids")
+            #     s1_attn_mask_raw = stage1_model_inputs.pop("attention_mask")
+
+            #     # Pad/Truncate Stage 1 input
+            #     stage1_input_ids, stage1_attention_mask = verl_F.postprocess_data(
+            #          input_ids=s1_input_ids_raw, attention_mask=s1_attn_mask_raw, max_length=self.max_prompt_length,
+            #          pad_token_id=self.tokenizer.pad_token_id, left_pad=True, truncation=self.truncation
+            #      )
+
+            #     # Calculate Stage 1 Position IDs
+            #     stage1_model_inputs_remaining = dict(stage1_model_inputs) # Keep remaining (e.g., grid info)
+            #     # Remove any non-tensor items that shouldn't be in multi_modal_inputs
+            #     if 'second_per_grid_ts' in stage1_model_inputs_remaining:
+            #         stage1_model_inputs_remaining.pop('second_per_grid_ts')
+
+            #     # Verify we have the video features
+            #     if 'pixel_values_videos' not in stage1_model_inputs_remaining:
+            #         logger.warning(f"Missing pixel_values_videos in processor output for item {item}")
+
+            #     if hasattr(self.processor, 'image_processor') and \
+            #        self.processor.image_processor.__class__.__name__ == "Qwen2VLImageProcessor":
+            #         #  print("Qwen2VLImageProcessor detected. Using custom position ID calculation.")
+            #          try:
+            #              from verl.models.transformers.qwen2_vl import get_rope_index
+            #              s1_pos_ids_list = [
+            #                 get_rope_index(
+            #                     self.processor,
+            #                     input_ids=stage1_input_ids[0],
+            #                     image_grid_thw=stage1_model_inputs.get("image_grid_thw"),
+            #                     video_grid_thw=stage1_model_inputs.get("video_grid_thw"),
+            #                     second_per_grid_ts=stage1_model_inputs.get("second_per_grid_ts"),
+            #                     attention_mask=stage1_attention_mask[0],
+            #                 )
+            #             ]  # (1, 3, seq_len)
+            #              stage1_position_ids = s1_pos_ids_list[0]
+            #          except ImportError: position_ids = compute_position_id_with_mask(stage1_attention_mask)[0]; logger.warning("Qwen func not found.") # Basic fallback
+            #          except KeyError as ke: position_ids = compute_position_id_with_mask(stage1_attention_mask)[0]; logger.warning(f"KeyError Qwen pos ID: {ke}") # Basic fallback
+            #     else:
+            #         #  print("Using default position ID calculation.")
+            #          stage1_position_ids = compute_position_id_with_mask(stage1_attention_mask)[0]
+            
+
+            # except RuntimeError as trunc_err:
+            #      logger.error(f"Stage 1 prompt too long for item {item}: {trunc_err}. Skipping.")
+            #      return None
+            # except Exception as stage1_err:
+            #      logger.error(f"Error preparing stage 1 inputs for item {item}: {stage1_err}", exc_info=True)
+            #      return None
+            
+            # --- 4. Prepare Stage 1 Tokenized Inputs (Grounding Prompt + Full Video) ---
             stage1_messages = []
             if self.system_prompt:
                 stage1_messages.append({"role": "system", "content": self.system_prompt})
-            # Format grounding prompt using template and action text
-            grounding_user_content = self.grounding_prompt_template.format(action_text)
+            # grounding_user_content = self.grounding_prompt_template.format(action_text)
+            grounding_user_content = [{"type": "video",
+                "video": video_path,
+                }, {
+                "type": "text",
+                "text": self.grounding_prompt_template.format(action_text)
+                }]
+            
             stage1_messages.append({"role": "user", "content": grounding_user_content})
 
-            stage1_input_ids, stage1_attention_mask, stage1_position_ids = None, None, None
-            stage1_model_inputs_remaining = {}
-            try:
-                # Tokenize Stage 1 prompt WITH full video features
-                stage1_raw_prompt = self.processor.apply_chat_template(stage1_messages, add_generation_prompt=True, tokenize=False)
-                stage1_model_inputs = self.processor(text=[stage1_raw_prompt], images=None, videos=[full_video_frames_tensor], return_tensors="pt")
+            # Process with processor
+            stage1_raw_prompt = self.processor.apply_chat_template(stage1_messages, add_generation_prompt=True, tokenize=False)
+            print(f"Stage 1 raw prompt: {stage1_raw_prompt}") # Debugging output
+            print(f"Full video frames tensor shape: {full_video_frames_tensor.shape}") # Debugging output
+            
+            # Store multi_modal_data (following official pattern)
+            multi_modal_data = {"video": [full_video_frames_tensor.numpy()]}  # Convert to numpy for consistency
+            
+            # Get model inputs
+            stage1_model_inputs = self.processor(text=[stage1_raw_prompt], images=None, videos=[full_video_frames_tensor], return_tensors="pt")
+            
+            # Pop input_ids and attention_mask
+            s1_input_ids_raw = stage1_model_inputs.pop("input_ids")
+            s1_attn_mask_raw = stage1_model_inputs.pop("attention_mask")
+            
+            # Remove second_per_grid_ts if present (following official pattern)
+            if "second_per_grid_ts" in stage1_model_inputs:
+                stage1_model_inputs.pop("second_per_grid_ts")
+            
+            # Pad/truncate
+            stage1_input_ids, stage1_attention_mask = verl_F.postprocess_data(
+                input_ids=s1_input_ids_raw, 
+                attention_mask=s1_attn_mask_raw, 
+                max_length=self.max_prompt_length,
+                pad_token_id=self.tokenizer.pad_token_id, 
+                left_pad=True, 
+                truncation=self.truncation
+            )
+            
+            # Calculate position IDs
+            if hasattr(self.processor, 'image_processor') and \
+            self.processor.image_processor.__class__.__name__ == "Qwen2VLImageProcessor":
+                try:
+                    from verl.models.transformers.qwen2_vl import get_rope_index
+                    stage1_position_ids = [
+                        get_rope_index(
+                            self.processor,
+                            input_ids=stage1_input_ids[0],
+                            image_grid_thw=stage1_model_inputs.get("image_grid_thw"),
+                            video_grid_thw=stage1_model_inputs.get("video_grid_thw"),
+                            second_per_grid_ts=stage1_model_inputs.get("second_per_grid_ts"),
+                            attention_mask=stage1_attention_mask[0],
+                        )
+                    ]
+                    stage1_position_ids = stage1_position_ids[0]
+                except:
+                    stage1_position_ids = compute_position_id_with_mask(stage1_attention_mask)[0]
+            else:
+                stage1_position_ids = compute_position_id_with_mask(stage1_attention_mask)[0]
+                
+            raw_prompt_ids = self.tokenizer.encode(stage1_raw_prompt, add_special_tokens=False)
+            if len(raw_prompt_ids) > self.max_prompt_length:
+                if self.truncation == "left":
+                    raw_prompt_ids = raw_prompt_ids[-self.max_prompt_length:]
+                elif self.truncation == "right":
+                    raw_prompt_ids = raw_prompt_ids[:self.max_prompt_length]
+                elif self.truncation == "error":
+                    raise RuntimeError(f"Prompt length {len(raw_prompt_ids)} is longer than {self.max_prompt_length}.")
 
-                if "input_ids" not in stage1_model_inputs or "attention_mask" not in stage1_model_inputs:
-                     raise ValueError("Processor output missing keys for Stage 1")
-                s1_input_ids_raw = stage1_model_inputs.pop("input_ids")
-                s1_attn_mask_raw = stage1_model_inputs.pop("attention_mask")
-
-                # Pad/Truncate Stage 1 input
-                stage1_input_ids, stage1_attention_mask = verl_F.postprocess_data(
-                     input_ids=s1_input_ids_raw, attention_mask=s1_attn_mask_raw, max_length=self.max_prompt_length,
-                     pad_token_id=self.tokenizer.pad_token_id, left_pad=True, truncation=self.truncation
-                 )
-
-                # Calculate Stage 1 Position IDs
-                stage1_model_inputs_remaining = dict(stage1_model_inputs) # Keep remaining (e.g., grid info)
-                if hasattr(self.processor, 'image_processor') and \
-                   self.processor.image_processor.__class__.__name__ == "Qwen2VLImageProcessor":
-                    #  print("Qwen2VLImageProcessor detected. Using custom position ID calculation.")
-                     try:
-                         from verl.models.transformers.qwen2_vl import get_rope_index
-                         s1_pos_ids_list = [
-                            get_rope_index(
-                                self.processor,
-                                input_ids=stage1_input_ids[0],
-                                image_grid_thw=stage1_model_inputs.get("image_grid_thw"),
-                                video_grid_thw=stage1_model_inputs.get("video_grid_thw"),
-                                second_per_grid_ts=stage1_model_inputs.get("second_per_grid_ts"),
-                                attention_mask=stage1_attention_mask[0],
-                            )
-                        ]  # (1, 3, seq_len)
-                         stage1_position_ids = s1_pos_ids_list[0]
-                     except ImportError: position_ids = compute_position_id_with_mask(stage1_attention_mask)[0]; logger.warning("Qwen func not found.") # Basic fallback
-                     except KeyError as ke: position_ids = compute_position_id_with_mask(stage1_attention_mask)[0]; logger.warning(f"KeyError Qwen pos ID: {ke}") # Basic fallback
-                else:
-                    #  print("Using default position ID calculation.")
-                     stage1_position_ids = compute_position_id_with_mask(stage1_attention_mask)[0]
-
-            except RuntimeError as trunc_err:
-                 logger.error(f"Stage 1 prompt too long for item {item}: {trunc_err}. Skipping.")
-                 return None
-            except Exception as stage1_err:
-                 logger.error(f"Error preparing stage 1 inputs for item {item}: {stage1_err}", exc_info=True)
-                 return None
+            
 
             # --- 5. Prepare Final Output Dictionary ---
             # This dictionary contains inputs ready for STAGE 1, and raw data for STAGE 2 prep
@@ -791,7 +819,12 @@ class TwoStageVideoQADataset(Dataset):
                 "input_ids": stage1_input_ids[0],        # Remove batch dim
                 "attention_mask": stage1_attention_mask[0],# Remove batch dim
                 "position_ids": stage1_position_ids,     # Shape depends on calculation
-                "multi_modal_inputs": stage1_model_inputs_remaining, # Other outputs like pixel_values
+                # "multi_modal_inputs": stage1_model_inputs_remaining, # Other outputs like pixel_values
+                # Multi-modal data (following official pattern)
+                "multi_modal_data": multi_modal_data,
+                "multi_modal_inputs": dict(stage1_model_inputs),  # Convert to dict
+                "prompts": stage1_raw_prompt,
+                "raw_prompt_ids": raw_prompt_ids,         # Raw tokenized input IDs
 
                 # == Raw Components for Stage 2 (Used by fit loop) ==
                 "question_text": question_text,                 # QA Question + Options
