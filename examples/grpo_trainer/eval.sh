@@ -7,6 +7,8 @@ MODEL_PATH=Qwen/Qwen2.5-VL-7B-Instruct
 CHECKPOINT_TO_EVALUATE=/home/chendong/video-rl/verl-video/checkpoints/video_vqa/qwen2_5_vl_7b_vqa_reward_451_0605_rpp/global_step_200 # <<< REPLACE
 CG_BENCH_JSON_FILE=/home/chendong/video-rl/cg-bench/reformatted_cg_bench_mini.jsonl # <<< REPLACE
 CG_BENCH_VIDEOS_DIR=/home/chendong/video-rl/cg-bench/cg_videos_720p # <<< REPLACE
+# CG_BENCH_JSON_FILE=/home/chendong/video-rl/charades_sta/charades_vqa_val.jsonl # <<< REPLACE
+# CG_BENCH_VIDEOS_DIR=/home/chendong/video-rl/charades_sta/Charades_v1_480 # <<< REPLACE
 
 VISIBLE_DEVICES="0,1,2,3" # Or just "0" if evaluating on a single GPU
 
@@ -41,4 +43,4 @@ CUDA_VISIBLE_DEVICES=${VISIBLE_DEVICES} python3 -m verl.trainer.eval_cgbench \
     +trainer.qa_accuracy_weight=0.4 \
     +trainer.qa_format_weight=0.2 \
     +trainer.thinking_tag_bonus=0.05 \
-    trainer.logger='["console"]' 2>&1 | tee cg_bench_eval_$(basename ${CHECKPOINT_TO_EVALUATE}).log
+    trainer.logger='["console"]' 2>&1 | tee cgbench_eval_$(basename ${CHECKPOINT_TO_EVALUATE}).log

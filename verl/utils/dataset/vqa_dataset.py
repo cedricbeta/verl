@@ -313,7 +313,7 @@ def _read_video_decord(
     if 'video_start' in ele or 'video_end' in ele:
         raise NotImplementedError("not support start_pts and end_pts in decord for now.")
     total_frames, video_fps = len(vr), vr.get_avg_fps()
-    logger.info(f"decord:  {video_path=}, {total_frames=}, {video_fps=}, time={time.time() - st:.3f}s")
+    print(f"decord:  {video_path=}, {total_frames=}, {video_fps=}, time={time.time() - st:.3f}s")
     nframes = smart_nframes(ele, total_frames=total_frames, video_fps=video_fps)
     logger.info(f"decord:  {video_path=}, {nframes=}, {total_frames=}, {video_fps=}")
     idx = torch.linspace(0, total_frames - 1, nframes).round().long().tolist()
@@ -661,7 +661,7 @@ class TwoStageVideoQADataset(Dataset):
             full_video_frames_tensor = None
             try:
                 # Use fetch_video to get processed tensor TCHW for the *whole* video
-                full_video_frames_tensor= fetch_video(ele_full_video, image_factor=self.video_processing_config["image_factor"])
+                full_video_frames_tensor, sample_fps = fetch_video(ele_full_video, image_factor=self.video_processing_config["image_factor"], return_video_sample_fps=True)
                 # print(f"Video {video_path} loaded with shape: {full_video_frames_tensor.shape}")
                 # exit(0)
             except Exception as e:
@@ -672,75 +672,12 @@ class TwoStageVideoQADataset(Dataset):
                  return None
 
             # --- 4. Prepare Stage 1 Tokenized Inputs (Grounding Prompt + Full Video) ---
-            # stage1_messages = []
-            # if self.system_prompt:
-            #     stage1_messages.append({"role": "system", "content": self.system_prompt})
-            # # Format grounding prompt using template and action text
-            # grounding_user_content = self.grounding_prompt_template.format(action_text)
-            # stage1_messages.append({"role": "user", "content": grounding_user_content})
-
-            # stage1_input_ids, stage1_attention_mask, stage1_position_ids = None, None, None
-            # stage1_model_inputs_remaining = {}
-            # try:
-            #     # Tokenize Stage 1 prompt WITH full video features
-            #     stage1_raw_prompt = self.processor.apply_chat_template(stage1_messages, add_generation_prompt=True, tokenize=False)
-            #     stage1_model_inputs = self.processor(text=[stage1_raw_prompt], images=None, videos=[full_video_frames_tensor], return_tensors="pt")
-
-            #     if "input_ids" not in stage1_model_inputs or "attention_mask" not in stage1_model_inputs:
-            #          raise ValueError("Processor output missing keys for Stage 1")
-            #     s1_input_ids_raw = stage1_model_inputs.pop("input_ids")
-            #     s1_attn_mask_raw = stage1_model_inputs.pop("attention_mask")
-
-            #     # Pad/Truncate Stage 1 input
-            #     stage1_input_ids, stage1_attention_mask = verl_F.postprocess_data(
-            #          input_ids=s1_input_ids_raw, attention_mask=s1_attn_mask_raw, max_length=self.max_prompt_length,
-            #          pad_token_id=self.tokenizer.pad_token_id, left_pad=True, truncation=self.truncation
-            #      )
-
-            #     # Calculate Stage 1 Position IDs
-            #     stage1_model_inputs_remaining = dict(stage1_model_inputs) # Keep remaining (e.g., grid info)
-            #     # Remove any non-tensor items that shouldn't be in multi_modal_inputs
-            #     if 'second_per_grid_ts' in stage1_model_inputs_remaining:
-            #         stage1_model_inputs_remaining.pop('second_per_grid_ts')
-
-            #     # Verify we have the video features
-            #     if 'pixel_values_videos' not in stage1_model_inputs_remaining:
-            #         logger.warning(f"Missing pixel_values_videos in processor output for item {item}")
-
-            #     if hasattr(self.processor, 'image_processor') and \
-            #        self.processor.image_processor.__class__.__name__ == "Qwen2VLImageProcessor":
-            #         #  print("Qwen2VLImageProcessor detected. Using custom position ID calculation.")
-            #          try:
-            #              from verl.models.transformers.qwen2_vl import get_rope_index
-            #              s1_pos_ids_list = [
-            #                 get_rope_index(
-            #                     self.processor,
-            #                     input_ids=stage1_input_ids[0],
-            #                     image_grid_thw=stage1_model_inputs.get("image_grid_thw"),
-            #                     video_grid_thw=stage1_model_inputs.get("video_grid_thw"),
-            #                     second_per_grid_ts=stage1_model_inputs.get("second_per_grid_ts"),
-            #                     attention_mask=stage1_attention_mask[0],
-            #                 )
-            #             ]  # (1, 3, seq_len)
-            #              stage1_position_ids = s1_pos_ids_list[0]
-            #          except ImportError: position_ids = compute_position_id_with_mask(stage1_attention_mask)[0]; logger.warning("Qwen func not found.") # Basic fallback
-            #          except KeyError as ke: position_ids = compute_position_id_with_mask(stage1_attention_mask)[0]; logger.warning(f"KeyError Qwen pos ID: {ke}") # Basic fallback
-            #     else:
-            #         #  print("Using default position ID calculation.")
-            #          stage1_position_ids = compute_position_id_with_mask(stage1_attention_mask)[0]
-            
-
-            # except RuntimeError as trunc_err:
-            #      logger.error(f"Stage 1 prompt too long for item {item}: {trunc_err}. Skipping.")
-            #      return None
-            # except Exception as stage1_err:
-            #      logger.error(f"Error preparing stage 1 inputs for item {item}: {stage1_err}", exc_info=True)
-            #      return None
-            
-            # --- 4. Prepare Stage 1 Tokenized Inputs (Grounding Prompt + Full Video) ---
             stage1_messages = []
+            
             if self.system_prompt:
-                stage1_messages.append({"role": "system", "content": self.system_prompt})
+                stage1_messages.append({"role": "system", "content": self.system_prompt+ f" Note that the video is sampled at {sample_fps:.2f} FPS."})
+            
+            
             # grounding_user_content = self.grounding_prompt_template.format(action_text)
             grounding_user_content = [{"type": "video",
                 "video": video_path,

@@ -92,7 +92,7 @@ def transform_jsonl_item_for_pipeline(
     containing raw components needed for the two-stage pipeline.
     """
     try:
-        qid = jsonl_item_dict.get("qid") 
+        # video_id = jsonl_item_dict.get("video_id") 
         video_uid = jsonl_item_dict.get("video_id")
         
         # S1 prompt uses the 'action' field from JSONL, which needs to be formatted by the template
@@ -104,15 +104,15 @@ def transform_jsonl_item_for_pipeline(
         s2_gt_answer_letter = jsonl_item_dict.get("answer")
         temporal_grounding_dict = jsonl_item_dict.get("temporal_grounding")
 
-        if not all([qid is not None, video_uid is not None, s1_raw_action_text, 
+        if not all([video_uid is not None, video_uid is not None, s1_raw_action_text, 
                     s2_user_prompt_text_with_choices, s2_gt_answer_letter, 
                     temporal_grounding_dict]):
-            print(f"Warning: Skipping JSONL item with qid {qid} due to missing essential fields. Item: {jsonl_item_dict}")
+            # print(f"Warning: Skipping JSONL item with video_id {video_id} due to missing essential fields. Item: {jsonl_item_dict}")
             return None
 
         video_path = os.path.join(video_base_path, f"{video_uid}{video_extension}")
         if not os.path.exists(video_path):
-            # print(f"Warning: Video file not found for qid {qid}, path: {video_path}. Skipping.")
+            # print(f"Warning: Video file not found for video_id {video_id}, path: {video_path}. Skipping.")
             return None
 
         gt_s1_start_time_raw = temporal_grounding_dict.get("start_time")
@@ -123,10 +123,10 @@ def transform_jsonl_item_for_pipeline(
             gt_s1_start_time = float(gt_s1_start_time_raw)
             gt_s1_end_time = float(gt_s1_end_time_raw)
             if not (gt_s1_start_time >= 0 and gt_s1_start_time <= gt_s1_end_time):
-                print(f"Warning: Invalid start/end times in temporal_grounding for qid {qid}: {temporal_grounding_dict}. Setting to 0,0.")
+                # print(f"Warning: Invalid start/end times in temporal_grounding for video_id {video_id}: {temporal_grounding_dict}. Setting to 0,0.")
                 gt_s1_start_time, gt_s1_end_time = 0.0, 0.0 
         else:
-            print(f"Warning: Non-numeric or missing start/end times in temporal_grounding for qid {qid}: {temporal_grounding_dict}. Setting to 0,0.")
+            # print(f"Warning: Non-numeric or missing start/end times in temporal_grounding for video_id {video_id}: {temporal_grounding_dict}. Setting to 0,0.")
             gt_s1_start_time, gt_s1_end_time = 0.0, 0.0
         
         # Format S1 user prompt using the 'action' field from JSONL
@@ -136,7 +136,7 @@ def transform_jsonl_item_for_pipeline(
         s2_user_prompt_text_final = s2_user_prompt_text_with_choices
         
         return {
-            "qid": qid, 
+            # "video_id": video_id, 
             "video_id": video_uid, 
             "video_path": video_path,
             "s1_user_prompt_text": s1_user_prompt_text_formatted,
@@ -149,7 +149,7 @@ def transform_jsonl_item_for_pipeline(
             "s2_system_prompt": s2_system_prompt 
         }
     except Exception as e:
-        print(f"Error transforming JSONL item (qid: {jsonl_item_dict.get('qid', 'Unknown')}): {e}")
+        # print(f"Error transforming JSONL item (video_id: {jsonl_item_dict.get('video_id', 'Unknown')}): {e}")
         import traceback
         traceback.print_exc()
         return None
@@ -303,11 +303,11 @@ def run_cg_bench_evaluation_standalone(config: OmegaConf):
     trainer_instance.init_workers() 
     
     print("\n--- Loading Checkpoint for CG-Bench Evaluation ---")
-    # if not (config.trainer.resume_mode == "resume_path" and config.trainer.resume_from_path):
-    #     raise ValueError("For evaluation, config.trainer.resume_mode must be 'resume_path' and "
-    #                      "config.trainer.resume_from_path must point to the checkpoint folder.")
-    # trainer_instance._load_checkpoint() 
-    # print(f"--- Checkpoint loaded. Trainer global_steps: {0} ---")
+    if not (config.trainer.resume_mode == "resume_path" and config.trainer.resume_from_path):
+        raise ValueError("For evaluation, config.trainer.resume_mode must be 'resume_path' and "
+                         "config.trainer.resume_from_path must point to the checkpoint folder.")
+    trainer_instance._load_checkpoint() 
+    print(f"--- Checkpoint loaded. Trainer global_steps: {0} ---")
     
     output_dir_final = output_dir_template.format(global_steps=0)
     os.makedirs(output_dir_final, exist_ok=True)
@@ -364,7 +364,7 @@ def run_cg_bench_evaluation_standalone(config: OmegaConf):
                 s1_full_video_frames = fetch_video(ele_s1_video, image_factor=video_proc_cfg_for_pipeline.get("image_factor", 28))
                 
                 if s1_full_video_frames is None or s1_full_video_frames.nelement() == 0: 
-                    print(f"{step_info_prefix_eval_loop} Warning: S1 full video failed for qid {item_data_transformed['qid']}. Skipping this item for S1 gen.")
+                    print(f"{step_info_prefix_eval_loop} Warning: S1 full video failed for video_id {item_data_transformed['video_id']}. Skipping this item for S1 gen.")
                     continue 
                 
                 item_data_transformed["original_video_nframes_s1"] = s1_full_video_frames.shape[0]
@@ -403,7 +403,7 @@ def run_cg_bench_evaluation_standalone(config: OmegaConf):
                 original_indices_map_s1.append(item_batch_idx)
                 
             except Exception as e_s1_prep_pipe:
-                print(f"{step_info_prefix_eval_loop} Error S1 prep for qid {item_data_transformed.get('qid', 'Unknown')}: {e_s1_prep_pipe}")
+                print(f"{step_info_prefix_eval_loop} Error S1 prep for video_id {item_data_transformed.get('video_id', 'Unknown')}: {e_s1_prep_pipe}")
         
         # --- Run S1 and S2 Pipeline for the batch ---
         if s1_gen_inputs_list: 
@@ -446,13 +446,13 @@ def run_cg_bench_evaluation_standalone(config: OmegaConf):
                         clip_start_s2_pipe, clip_end_s2_pipe = s1_pred_start_pipe, s1_pred_end_pipe
                     else: 
                         clip_start_s2_pipe, clip_end_s2_pipe = 0.0, None 
-                        print(f"{step_info_prefix_eval_loop} Warning: S2 clipping for qid {item_data_transformed['qid']} defaulting to full video.")
+                        print(f"{step_info_prefix_eval_loop} Warning: S2 clipping for video_id {item_data_transformed['video_id']} defaulting to full video.")
 
                     ele_s2_video_segment_cfg = {"video": item_data_transformed["video_path"], "video_start": clip_start_s2_pipe, "video_end": clip_end_s2_pipe, **video_proc_cfg_for_pipeline} 
                     s2_clipped_video_frames = fetch_video(ele_s2_video_segment_cfg, image_factor=video_proc_cfg_for_pipeline.get("image_factor", 28))
                          
                     if s2_clipped_video_frames is None or s2_clipped_video_frames.nelement() == 0: 
-                        print(f"{step_info_prefix_eval_loop} Warning: S2 clipped video failed for qid {item_data_transformed['qid']}. Skipping this item for S2 gen.")
+                        print(f"{step_info_prefix_eval_loop} Warning: S2 clipped video failed for video_id {item_data_transformed['video_id']}. Skipping this item for S2 gen.")
                         continue
                     
                     item_data_for_s2_proc_pipe = {"question_text": item_data_transformed["s2_user_prompt_text"], "clipped_video": s2_clipped_video_frames, "original_index": item_batch_idx}
@@ -461,7 +461,7 @@ def run_cg_bench_evaluation_standalone(config: OmegaConf):
                         s2_gen_inputs_list.append(processed_s2_item)
                         original_indices_map_s2.append(item_batch_idx) 
                 except Exception as e_s2_prep_pipe:
-                    print(f"{step_info_prefix_eval_loop} Error S2 prep for qid {item_data_transformed.get('qid', 'Unknown')}: {e_s2_prep_pipe}")
+                    print(f"{step_info_prefix_eval_loop} Error S2 prep for video_id {item_data_transformed.get('video_id', 'Unknown')}: {e_s2_prep_pipe}")
 
             # S2 Generation
             if s2_gen_inputs_list:
@@ -553,7 +553,7 @@ def run_cg_bench_evaluation_standalone(config: OmegaConf):
                     reward_metrics_ptr += 1
             
             detailed_results_for_saving.append({
-                "qid": item_data_transformed["qid"],
+                "video_id": item_data_transformed["video_id"],
                 "video_uid": item_data_transformed["video_id"],
                 "s1_gt_start": item_data_transformed["s1_gt_start_time"],
                 "s1_gt_end": item_data_transformed["s1_gt_end_time"],
