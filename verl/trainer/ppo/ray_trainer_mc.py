@@ -966,7 +966,7 @@ class RayPPOTrainer(object):
         self.train_dataloader = StatefulDataLoader(dataset=self.train_dataset,
                                                    batch_size=self.config.data.get('gen_batch_size',
                                                                                    self.config.data.train_batch_size),
-                                                   num_workers=8,
+                                                   num_workers=1,
                                                    drop_last=True,
                                                    collate_fn=collate_fn,
                                                    sampler=sampler)
@@ -982,7 +982,7 @@ class RayPPOTrainer(object):
             # Validation datasets are sent to inference engines as a whole batch,
             # which will schedule the memory themselves.
             batch_size=len(self.val_dataset),
-            num_workers=8,
+            num_workers=1,
             shuffle=False,
             drop_last=False,
             collate_fn=collate_fn)
@@ -1022,7 +1022,8 @@ class RayPPOTrainer(object):
             dataset=two_stage_dataset,
             batch_size=self.config.data.get('gen_batch_size',
                                             self.config.data.train_batch_size),
-            num_workers=8,
+            num_workers=1,
+            prefetch_factor=1,
             drop_last=True,
             collate_fn=collate_fn,
             sampler=sampler
@@ -1063,7 +1064,8 @@ class RayPPOTrainer(object):
              self.vqa_val_dataloader = StatefulDataLoader(
                  dataset=self.vqa_val_dataset,
                  batch_size=len(self.vqa_val_dataset), # Process all validation data at once
-                 num_workers=self.config.data.get("val_num_workers", 4), # Use separate config or default
+                 num_workers=self.config.data.get("val_num_workers", 1), # Use separate config or default
+                 prefetch_factor=1,
                  shuffle=False,
                  drop_last=False,
                  collate_fn=collate_fn # Use the same collate function
@@ -2789,6 +2791,8 @@ class RayPPOTrainer(object):
                                 ppo_uids_for_valid_items = [full_batch_proto_from_loader.non_tensor_batch['uid'][idx_val_ppo] for idx_val_ppo in s2_valid_original_indices]
                                 ppo_non_tensor_data_for_actor['uid'] = np.array(ppo_uids_for_valid_items, dtype=object)
                                 print(f"{step_info_prefix} [PPO Assembly VERBOSE]   Added reward-specific non-tensor data (UIDs, GTs, S1 texts).")
+                                del full_batch_proto_from_loader
+                                torch.cuda.empty_cache()
 
                                 # --- Create the final DataProto for PPO updates ---
                                 # This is the 'batch' variable that PPO core algorithms expect.

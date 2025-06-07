@@ -51,7 +51,7 @@ VIDEO_MAX_PIXELS = 768 * 28 * 28
 FRAME_FACTOR = 2
 FPS = 2.0
 FPS_MIN_FRAMES = 4
-FPS_MAX_FRAMES = 768
+FPS_MAX_FRAMES = 32
 
 # Set the maximum number of video token inputs.
 # Here, 128K represents the maximum number of input tokens for the VLLM model.
@@ -308,7 +308,7 @@ def _read_video_decord(
     import decord
     video_path = ele["video"]
     st = time.time()
-    vr = decord.VideoReader(video_path)
+    vr = decord.VideoReader(video_path, ctx=decord.cpu(0))
     # TODO: support start_pts and end_pts
     if 'video_start' in ele or 'video_end' in ele:
         raise NotImplementedError("not support start_pts and end_pts in decord for now.")

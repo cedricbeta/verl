@@ -109,7 +109,16 @@ class DataParallelPPOCritic(BasePPOCritic):
                                             **multi_modal_inputs,
                                             use_cache=False)  # prevent model thinks we are generating
                 values = output.logits
-                values = values[:, -response_length - 1:-1].squeeze(-1)
+                # values = values[:, -response_length - 1:-1].squeeze(-1)
+                logits = output.logits  # [bsz, seq_len, vocab_size] or [bsz, seq_len, 1]
+                if logits.size(-1) > 1:
+                    # collapse vocab dimension
+                    values = logits.mean(dim=-1)         # -> [bsz, seq_len]
+                else:
+                    values = logits.squeeze(-1)         # -> [bsz, seq_len]
+
+                # —— 新增：只保留 action 部分 ——  
+                values = values[:, -response_length:]   # -> [bsz, response_length]
             return values
 
     def _optimizer_step(self):
@@ -159,7 +168,11 @@ class DataParallelPPOCritic(BasePPOCritic):
         responses = data.batch['responses']
         attention_mask = data.batch['attention_mask']
         response_length = responses.size(1)
-        values = values * attention_mask[:, -response_length - 1:-1]
+        # values = values * attention_mask[:, -response_length - 1:-1]
+        mask = attention_mask[:, -response_length:]     # [bsz, response_length]
+        values = values[:, -response_length:]           # [bsz, response_length]
+        values = values * mask                          # zero out padding
+
 
         if use_dynamic_bsz:
             indices = list(itertools.chain.from_iterable(indices))
@@ -199,7 +212,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                     micro_batches, _ = rearrange_micro_batches(batch=mini_batch, max_token_len=max_token_len)
                 else:
                     micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
-                    self.gradient_accumulation = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
+                self.gradient_accumulation = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
 
                 self.critic_optimizer.zero_grad()
 
