@@ -257,6 +257,7 @@ def pad_sequence_to_length(tensors, max_seq_len, pad_token_id, left_pad=False):
 
 def postprocess_data(input_ids: torch.Tensor,
                      attention_mask: torch.Tensor,
+                     position_ids: torch.Tensor,
                      max_length: int,
                      pad_token_id: int,
                      left_pad=True,
@@ -277,20 +278,23 @@ def postprocess_data(input_ids: torch.Tensor,
                                                 max_seq_len=max_length,
                                                 pad_token_id=0,
                                                 left_pad=left_pad)
+        position_ids = pad_sequence_to_length(position_ids, max_seq_len=max_length, pad_token_id=0, left_pad=left_pad)
     elif sequence_length > max_length:
         if truncation == 'left':
             # actually, left truncation may not be reasonable
             input_ids = input_ids[:, -max_length:]
             attention_mask = attention_mask[:, -max_length:]
+            position_ids = position_ids[:, -max_length:]
         elif truncation == 'right':
             input_ids = input_ids[:, :max_length]
             attention_mask = attention_mask[:, :max_length]
+            position_ids = position_ids[:, :max_length]
         elif truncation == 'error':
             raise NotImplementedError(f'{sequence_length=} is larger than {max_length=}')
         else:
             raise NotImplementedError(f'Unknown truncation method {truncation}')
 
-    return input_ids, attention_mask
+    return input_ids, attention_mask, position_ids
 
 
 def remove_pad_token(input_ids: torch.Tensor, attention_mask: torch.Tensor):

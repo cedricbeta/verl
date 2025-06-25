@@ -184,7 +184,7 @@ class TaskRunner:
             grounding_weight=config.trainer.grounding_weight,
             qa_accuracy_weight=config.trainer.qa_accuracy_weight,
             qa_format_weight=config.trainer.qa_format_weight,
-            num_examine=1,
+            num_examine=config.data.train_batch_size,  # Example: get from config
         )
         
         compute_score = get_custom_reward_fn(config)

@@ -14,20 +14,27 @@ data:
   filter_overlong_prompts: false
   filter_overlong_prompts_workers: 1
   truncation: error
-  max_prompt_length: 4096
+  max_prompt_length: 25284
   max_response_length: 2048
-  system_prompt: "You FIRST think about the reasoning process as an internal monologue\
-    \ and then provide the final answer. The reasoning process MUST BE enclosed within\
-    \ <think> </think> tags.  The final answer MUST BE put in <answer> </answer> tags.\
-    \ Output the final answer in seconds(float) in JSON format within {} \n"
+  system_prompt: "You are a temporal grounding assistant.  You will be given: - “frames”:\
+    \ an ordered list of video frames (frame_0 … frame_n). - “question”: a natural-language\
+    \ query that asks for a time interval in the video.\nUse the following procedure:\
+    \ 1. FIRST think through your reasoning as an internal monologue, and enclose\
+    \ it within <think>…</think> tags. 2. THEN give the start and end times (in frame_id,\
+    \ as int) by identifying frame indices. 3. Finally, output your result enclosed\
+    \ in <answer>…</answer> tags, in JSON format:\n      <answer>{\"start_time\":\
+    \ <int>, \"end_time\": <int>}</answer>\n  If the answer is not computable, output:\n\
+    \      <answer>{\"start_time\": 0, \"end_time\": 0}</answer>\n\nExample structure:\
+    \ <think> – I see that the action starts around frame 5…  – It ends around frame\
+    \ 20, because... </think> <answer>{\"start_time\": 5, \"end_time\": 20}</answer>\n"
   custom_cls:
     path: null
     name: null
-  video_base_path: /home/chendong/video-rl/cg-bench
+  video_base_path: /home/chendong/video-rl/cg-bench/cg_videos_720p
 actor_rollout_ref:
   hybrid_engine: true
   model:
-    path: Qwen/Qwen2.5-VL-3B-Instruct
+    path: Qwen/Qwen2.5-VL-7B-Instruct
     external_lib: null
     override_config: {}
     enable_gradient_checkpointing: true
@@ -39,7 +46,7 @@ actor_rollout_ref:
     ppo_micro_batch_size: null
     ppo_micro_batch_size_per_gpu: 1
     use_dynamic_bsz: false
-    ppo_max_token_len_per_gpu: 16384
+    ppo_max_token_len_per_gpu: 15360
     grad_clip: 1.0
     clip_ratio: 0.2
     clip_ratio_low: 0.2
@@ -96,7 +103,7 @@ actor_rollout_ref:
     free_cache_engine: false
     load_format: dummy_dtensor
     tensor_model_parallel_size: 2
-    max_num_batched_tokens: 8192
+    max_num_batched_tokens: 32768
     max_model_len: null
     max_num_seqs: 1024
     log_prob_micro_batch_size: null
@@ -144,12 +151,12 @@ critic:
       fsdp_size: -1
   ppo_mini_batch_size: ${actor_rollout_ref.actor.ppo_mini_batch_size}
   ppo_micro_batch_size: null
-  ppo_micro_batch_size_per_gpu: 2
+  ppo_micro_batch_size_per_gpu: 1
   forward_micro_batch_size: ${critic.ppo_micro_batch_size}
   forward_micro_batch_size_per_gpu: ${critic.ppo_micro_batch_size_per_gpu}
   use_dynamic_bsz: ${actor_rollout_ref.actor.use_dynamic_bsz}
   ppo_max_token_len_per_gpu: 32768
-  forward_max_token_len_per_gpu: ${critic.ppo_max_token_len_per_gpu}
+  forward_max_token_len_per_gpu: 32768
   ulysses_sequence_parallel_size: 1
   ppo_epochs: ${actor_rollout_ref.actor.ppo_epochs}
   shuffle: ${actor_rollout_ref.actor.shuffle}
@@ -187,7 +194,7 @@ algorithm:
   gamma: 1.0
   lam: 1.0
   adv_estimator: reinforce_plus_plus
-  use_kl_in_reward: false
+  use_kl_in_reward: true
   kl_penalty: kl
   kl_ctrl:
     type: fixed
@@ -204,12 +211,12 @@ trainer:
   - console
   log_val_generations: 0
   nnodes: 1
-  n_gpus_per_node: 2
+  n_gpus_per_node: 4
   save_freq: 10
   resume_mode: resume_path
-  resume_from_path: /home/chendong/video-rl/verl-video/checkpoints/video_vqa/qwen2_5_vl_3b_tvg_reward_442/global_step_100
+  resume_from_path: /home/chendong/video-rl/Temporal-R1/checkpoints/easy_r1/qwen2_5_vl_7b_tvg_0610/global_step_100
   val_before_train: false
-  test_freq: 50
+  test_freq: 100
   critic_warmup: 0
   default_hdfs_dir: null
   del_local_ckpt_after_load: false
@@ -218,7 +225,7 @@ trainer:
   max_critic_ckpt_to_keep: null
   ray_wait_register_center_timeout: 300
   run_cg_bench_evaluation: true
-  cg_bench_json_path: /home/chendong/video-rl/cg-bench/reformatted_cg_bench.jsonl
+  cg_bench_json_path: /home/chendong/video-rl/cg-bench/reformatted_cg_bench_mini.jsonl
   val_only: true
   val_only_after_cg_bench: true
   cg_bench_output_dir: /home/chendong/video-rl/cg-bench

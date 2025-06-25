@@ -4,7 +4,7 @@ export VLLM_USE_V1=0
 
 # MODEL_PATH=/home/chendong/video-rl/Temporal-R1/Temporal-R1-3B-Charades
 MODEL_PATH=Qwen/Qwen2.5-VL-7B-Instruct
-CHECKPOINT_TO_EVALUATE=/home/chendong/video-rl/verl-video/checkpoints/video_vqa/qwen2_5_vl_7b_vqa_reward_451_0605_rpp/global_step_200 # <<< REPLACE
+CHECKPOINT_TO_EVALUATE=/home/chendong/video-rl/Temporal-R1/checkpoints/easy_r1/qwen2_5_vl_7b_tvg_0610/global_step_100 # <<< REPLACE
 CG_BENCH_JSON_FILE=/home/chendong/video-rl/cg-bench/reformatted_cg_bench_mini.jsonl # <<< REPLACE
 CG_BENCH_VIDEOS_DIR=/home/chendong/video-rl/cg-bench/cg_videos_720p # <<< REPLACE
 # CG_BENCH_JSON_FILE=/home/chendong/video-rl/charades_sta/charades_vqa_val.jsonl # <<< REPLACE

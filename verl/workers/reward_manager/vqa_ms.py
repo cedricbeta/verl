@@ -13,9 +13,19 @@ from verl import DataProto
 import logging
 logger = logging.getLogger(__name__)
 
+def temporal_iou(A, B):
+    
+    # print(f"temporal_iou: pred={A}, gt={B}")
+    max0 = max((A[0]), (B[0]))
+    min0 = min((A[0]), (B[0]))
+    max1 = max((A[1]), (B[1]))
+    min1 = min((A[1]), (B[1]))
+    _iou=max(min1 - max0, 0) / (max1 - min0)
+    return max(0,_iou)
+
 # Updated tvg_compute_score to expect <thinking> and <grounding>
 def tvg_compute_score(
-    response_text: str,
+    response_text: str, video_length: float, total_frames: int,
     gt_times: list[Optional[float]],
     grounding_tag_regex: str = r"<answer>(.*?)</answer>", # Regex for grounding tag
     thinking_tag_present_bonus: float = 0.1 # Small bonus if <thinking> is found
@@ -53,10 +63,19 @@ def tvg_compute_score(
                     base_tvg_format_score = 1.0 # Grounding tag and JSON keys are correct
                     raw_start = answer_data["start_time"]
                     raw_end = answer_data["end_time"]
-                    if raw_start is not None and str(raw_start).strip() != "":
-                        parsed_start = float(raw_start)
-                    if raw_end is not None and str(raw_end).strip() != "":
-                        parsed_end = float(raw_end)
+                    print(f"raw_start: {raw_start}, raw_end: {raw_end}, total_frames: {total_frames}")
+                    parsed_start = float(raw_start) / total_frames
+                    parsed_end = float(raw_end) / total_frames
+                    # if raw_start is not None:
+                    #     parsed_start = int(raw_start)
+                    #     parsed_start = parsed_start / total_frames
+                    #     print(f"parsed_start: {parsed_start}")
+                    # if raw_end is not None:
+                    #     parsed_end = int(raw_end)
+                    #     parsed_end = parsed_end / total_frames
+                    #     print(f"parsed_end: {parsed_end}") 
+                    # print(f"parsed_start: {parsed_start}, parsed_end: {parsed_end}")
+                        
     except json.JSONDecodeError:
         logger.debug(f"JSONDecodeError parsing S1 grounding content: {response_text}")
     except ValueError:
@@ -65,33 +84,26 @@ def tvg_compute_score(
         logger.debug(f"Generic error parsing S1 grounding content: {response_text}")
 
     # Calculate IoU (tvg_accuracy)
-    if parsed_start is not None and parsed_end is not None and \
-       gt_times[0] is not None and gt_times[1] is not None:
-        gt_start, gt_end = gt_times
-        if parsed_start <= parsed_end and gt_start <= gt_end:
-            overlap_start = max(gt_start, parsed_start)
-            overlap_end = min(gt_end, parsed_end)
-            overlap_duration = max(0, overlap_end - overlap_start)
-            gt_duration = gt_end - gt_start
-            parsed_duration = parsed_end - parsed_start
-            union_duration = gt_duration + parsed_duration - overlap_duration
-            if union_duration > 1e-6: tvg_accuracy = overlap_duration / union_duration
-            elif overlap_duration > 1e-6: tvg_accuracy = 1.0
-            else: tvg_accuracy = 0.0
-        else: tvg_accuracy = 0.0
-    else: tvg_accuracy = 0.0
-
+    # print(f"response_text: {response_text}")
+    print(f"Parsed start: {parsed_start}, Parsed end: {parsed_end},Total frames: {total_frames} ")
+    print(f"GT times: {gt_times}, Video length: {video_length}")
+    
+    print(f"parsed gt times: {[gt_times[0] / video_length, gt_times[1] / video_length]}")
+    
+    if parsed_start is None or parsed_end is None:
+        parsed_start, parsed_end = 0.0, 0.0 # Default to zero if parsing failed
+    tvg_accuracy = temporal_iou([parsed_start, parsed_end], [gt_times[0] / video_length, gt_times[1] / video_length])
+    
     # Final format score includes bonus for thinking tag
-    total_tvg_format_score = base_tvg_format_score + (thinking_bonus if base_tvg_format_score > 0.5 else 0) # Add thinking bonus only if base format is good
-    total_tvg_format_score = min(total_tvg_format_score, 1.0) # Cap at 1.0
+    total_tvg_format_score = base_tvg_format_score + thinking_bonus
 
     # Score: e.g. 0.3 for format, 0.7 for accuracy (can be tuned)
     if base_tvg_format_score > 0.5: # Only give accuracy points if essential grounding format is met
-        final_score = (0.3 * total_tvg_format_score) + (0.7 * tvg_accuracy)
+        final_score = (0.3 * total_tvg_format_score) + (tvg_accuracy)
     else:
         final_score = 0.0 # No score if basic grounding tag/JSON is wrong
 
-    return {"score": final_score, "tvg_accuracy": tvg_accuracy, "tvg_format": total_tvg_format_score, "base_tvg_format": base_tvg_format_score, "thinking_present_s1": float(thinking_bonus > 0)}
+    return {"pred_start": parsed_start, "pred_end": parsed_end, "video_length": video_length, "score": final_score, "tvg_accuracy": tvg_accuracy, "tvg_format": total_tvg_format_score, "base_tvg_format": base_tvg_format_score, "thinking_present_s1": float(thinking_bonus > 0)}
 
 
 class VQAMultiStageRewardManager:
@@ -151,6 +163,8 @@ class VQAMultiStageRewardManager:
         return None
 
     def __call__(self, data: DataProto, return_dict=False) -> Union[torch.Tensor, Dict[str, Any]]:
+        
+        # print(f"VQAMultiStageRewardManager called with data: {data}")
         required_batch_keys = ['responses']
         required_non_tensor_keys = ['decoded_grounding_texts', 'start_time', 'end_time', 'ground_truth_answer']
         # ... (Input validation remains the same) ...
@@ -203,12 +217,13 @@ class VQAMultiStageRewardManager:
                 # --- Grounding Score (S1) ---
                 # tvg_compute_score expects full S1 response text and GT times
                 s1_score_details = tvg_compute_score(
-                    s1_response_text_full,
+                    s1_response_text_full, data.non_tensor_batch['video_length'][i], data.non_tensor_batch['total_frames'][i],
                     [gt_start_time, gt_end_time],
                     grounding_tag_regex=self.s1_grounding_tag_pattern.pattern, # Pass the string pattern
                     thinking_tag_present_bonus=self.thinking_tag_bonus
                 )
                 grounding_score_component = s1_score_details["score"] # This score combines S1 format (grounding tag, JSON, thinking) & IoU
+                tvg_score = s1_score_details["tvg_accuracy"] # IoU for S1
 
                 # --- QA Accuracy Score (S2) ---
                 qa_accuracy_score = 0.0
@@ -223,11 +238,24 @@ class VQAMultiStageRewardManager:
                 qa_format_score = min(base_s2_format_score + s2_thinking_bonus_applied, 1.0)
 
                 # --- Combine Rewards ---
+                # if tvg_score > 0:
+                #     # final_score = (
+                #     #     self.grounding_weight * grounding_score_component +
+                #     #     self.qa_accuracy_weight * qa_accuracy_score +
+                #     #     self.qa_format_weight * qa_format_score
+                #     # )
+                #     final_score = (
+                #         grounding_score_component +
+                #         self.qa_accuracy_weight * qa_accuracy_score +
+                #         self.qa_format_weight * qa_format_score
+                #     )
+                # else: 
+                #     final_score = 0.0
                 final_score = (
-                    self.grounding_weight * grounding_score_component +
-                    self.qa_accuracy_weight * qa_accuracy_score +
-                    self.qa_format_weight * qa_format_score
-                )
+                        self.grounding_weight * grounding_score_component +
+                        self.qa_accuracy_weight * qa_accuracy_score +
+                        self.qa_format_weight * qa_format_score
+                    )
 
                 # --- Store Rewards and Metrics ---
                 reward_extra_info['s1_grounding_iou'].append(s1_score_details["tvg_accuracy"])
@@ -246,10 +274,12 @@ class VQAMultiStageRewardManager:
                 if len(valid_indices_s2) > 0:
                     reward_tensor[i, last_token_index_s2] = final_score
 
+                # print(f"already_print_count: {already_print_count}, num_examine: {self.num_examine}")
                 if already_print_count < self.num_examine:
                     print("-" * 50)
                     print(f"VQA Reward Example {i+1}/{batch_size} (Print {already_print_count + 1}/{self.num_examine})")
                     print(f"[S1 Full Response]: {s1_response_text_full}")
+                    print(f"[S1 predicted Start/End]: [{s1_score_details['pred_start']}, {s1_score_details['pred_end']}, {s1_score_details['video_length']}]")
                     print(f"[S2 Full Response]: {decoded_s2_response_full if len(valid_indices_s2) > 0 else '<Empty S2 Response>'}")
                     print(f"[GT Times]: [{gt_start_time}, {gt_end_time}]")
                     print(f"[GT Answer]: {gt_qa_answer_letter}")

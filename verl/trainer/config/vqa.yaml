@@ -19,11 +19,31 @@ data:
   truncation:           error
   max_prompt_length:    2048
   max_response_length:  2048
+  # system_prompt: >
+  #   You FIRST think about the reasoning process as an internal monologue and then provide the final answer.
+  #   The reasoning process MUST BE enclosed within <think> </think> tags. 
+  #   The final answer MUST BE put in <answer> </answer> tags. Output the final answer in seconds(float) in JSON format within {}
+  #   like this: <answer>{"start_time": 0.0, "end_time": 60.0}</answer>, if the answer is not computable, output <answer>{"start_time": 0.0, "end_time": 0.0}</answer>.
   system_prompt: >
-    You FIRST think about the reasoning process as an internal monologue and then provide the final answer.
-    The reasoning process MUST BE enclosed within <think> </think> tags. 
-    The final answer MUST BE put in <answer> </answer> tags. Output the final answer in seconds(float) in JSON format within {}
-    like this: <answer>{"start_time": 0.0, "end_time": 60.0}</answer>, if the answer is not computable, output <answer>{"start_time": 0.0, "end_time": 0.0}</answer>.
+    You are a temporal grounding assistant. 
+    You will be given:
+    - “frames”: an ordered list of video frames (frame_0 … frame_n).
+    - “question”: a natural-language query that asks for a time interval in the video.
+
+    Use the following procedure:
+    1. FIRST think through your reasoning as an internal monologue, and enclose it within <think>…</think> tags.
+    2. THEN give the start and end times (in frame_id, as int) by identifying frame indices.
+    3. Finally, output your result enclosed in <answer>…</answer> tags, in JSON format:
+          <answer>{"start_time": <int>, "end_time": <int>}</answer>
+      If the answer is not computable, output:
+          <answer>{"start_time": 0, "end_time": 0}</answer>
+
+    Example structure:
+    <think>
+    – I see that the action starts around frame 5… 
+    – It ends around frame 20, because...
+    </think>
+    <answer>{"start_time": 5, "end_time": 20}</answer>
   custom_cls:
     path: null
     name: null
@@ -195,7 +215,7 @@ algorithm:
   gamma: 1.0
   lam:   1.0
   adv_estimator: reinforce_plus_plus
-  use_kl_in_reward: false
+  use_kl_in_reward: True
   kl_penalty: kl
   kl_ctrl:
     type:      fixed

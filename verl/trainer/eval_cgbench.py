@@ -182,7 +182,7 @@ def run_cg_bench_evaluation_standalone(config: OmegaConf):
         raise ValueError("Missing required paths in config: trainer.cg_bench_json_path, data.video_base_path, or trainer.cg_bench_output_dir")
 
     # --- Load and Transform Data ---
-    s1_prompt_template = config.data.get("grounding_prompt_template", "Find the start and end time for the action: {}")
+    s1_prompt_template = config.data.get("grounding_prompt_template", "Give the query: {}, when does the described content occur in the video?")
     s2_system_prompt_text = config.data.get("system_prompt", '''You FIRST think about the reasoning process as an internal monologue and then provide the final answer.
                         The reasoning process MUST BE enclosed within <think> </think> tags.
                         The final answer MUST BE put in <answer> </answer> tags, containing only the letter of the correct option.''')
@@ -282,7 +282,7 @@ def run_cg_bench_evaluation_standalone(config: OmegaConf):
         thinking_tag_bonus=config.trainer.get("thinking_tag_bonus", 0.05),
         s1_grounding_tag_regex=config.trainer.get("s1_grounding_tag_regex", r"<answer>(.*?)</answer>"),
         s2_answer_tag_regex=config.trainer.get("s2_answer_tag_regex", r"<answer>\s*([A-Z])\s*</answer>"),
-        num_examine=config.trainer.get("val_num_examine", 3)
+        num_examine=3
     )
     
     eval_config = deepcopy(config)
@@ -361,7 +361,7 @@ def run_cg_bench_evaluation_standalone(config: OmegaConf):
             try:
                 # Stage 1 video uses full video, video_proc_cfg_for_pipeline applies (fps or nframes)
                 ele_s1_video = {"video": item_data_transformed["video_path"], **video_proc_cfg_for_pipeline}
-                s1_full_video_frames = fetch_video(ele_s1_video, image_factor=video_proc_cfg_for_pipeline.get("image_factor", 28))
+                s1_full_video_frames, sample_fps, total_frames = fetch_video(ele_s1_video, image_factor=video_proc_cfg_for_pipeline.get("image_factor", 28), return_video_sample_fps=True)
                 
                 if s1_full_video_frames is None or s1_full_video_frames.nelement() == 0: 
                     print(f"{step_info_prefix_eval_loop} Warning: S1 full video failed for video_id {item_data_transformed['video_id']}. Skipping this item for S1 gen.")
@@ -383,14 +383,27 @@ def run_cg_bench_evaluation_standalone(config: OmegaConf):
                 s1_attn_mask_raw_pipe = s1_model_inputs_pipeline.pop("attention_mask")
                 if "second_per_grid_ts" in s1_model_inputs_pipeline:
                     s1_model_inputs_pipeline.pop("second_per_grid_ts")
+                    
+                from verl.models.transformers.qwen2_vl import get_rope_index
+                s1_pos_ids_pipe_val = [
+                        get_rope_index(
+                                processor,
+                                input_ids=s1_input_ids_raw_pipe[0],
+                                image_grid_thw=s1_model_inputs_pipeline.get("image_grid_thw"),
+                                video_grid_thw=s1_model_inputs_pipeline.get("video_grid_thw"),
+                                second_per_grid_ts=s1_model_inputs_pipeline.get("second_per_grid_ts"),
+                                attention_mask=s1_attn_mask_raw_pipe[0],
+                            )
+                    ]
+                s1_pos_ids_pipe_val = s1_pos_ids_pipe_val[0]
                 
-                s1_input_ids_pipe, s1_attn_mask_pipe = verl_F.postprocess_data(
-                    s1_input_ids_raw_pipe, s1_attn_mask_raw_pipe,
+                s1_input_ids_pipe, s1_attn_mask_pipe, s1_pos_ids_pipe_val = verl_F.postprocess_data(
+                    s1_input_ids_raw_pipe, s1_attn_mask_raw_pipe,position_ids=s1_pos_ids_pipe_val,
                     max_length=config.data.max_prompt_length,
                     pad_token_id=tokenizer.pad_token_id, left_pad=True,
                     truncation=config.data.get("truncation", "error")
                 )
-                s1_pos_ids_pipe_val = compute_position_id_with_mask(s1_attn_mask_pipe)[0] 
+                # s1_pos_ids_pipe_val = compute_position_id_with_mask(s1_attn_mask_pipe)[0] 
                 
                 s1_multi_modal_inputs_final = dict(s1_model_inputs_pipeline)
                 raw_prompt_id = tokenizer.encode(s1_raw_prompt, add_special_tokens=False)
@@ -424,7 +437,9 @@ def run_cg_bench_evaluation_standalone(config: OmegaConf):
             if s1_gen_output_proto_pipe.batch.get('responses') is not None:
                 s1_responses_valid_items = s1_gen_output_proto_pipe.batch.get('responses')
                 decoded_s1_texts_valid_items = tokenizer.batch_decode(s1_responses_valid_items, skip_special_tokens=True)
-                predicted_s1_times_valid_items = parse_grounding_times(decoded_s1_texts_valid_items)
+                print("test: ", len(decoded_s1_texts_valid_items), decoded_s1_texts_valid_items)
+                
+                predicted_s1_times_valid_items, raw_times = parse_grounding_times(decoded_s1_texts_valid_items, [sample_fps], [32])
                 print(f"{step_info_prefix_eval_loop} S1 generation output for batch {i_pipeline_batch}: {decoded_s1_texts_valid_items}")
                 
                 for i, original_batch_item_idx in enumerate(original_indices_map_s1):
@@ -440,7 +455,12 @@ def run_cg_bench_evaluation_standalone(config: OmegaConf):
             for item_batch_idx, item_data_transformed in enumerate(current_pipeline_batch_dicts):
                 try:
                     clip_start_s2_pipe, clip_end_s2_pipe = item_data_transformed["s1_gt_start_time"], item_data_transformed["s1_gt_end_time"]
+                    print(f"{step_info_prefix_eval_loop} S1 GT times for video_id {item_data_transformed['video_id']}: {clip_start_s2_pipe}, {clip_end_s2_pipe}")
+                    print(f"{step_info_prefix_eval_loop} GT for video_id {item_data_transformed['s2_gt_answer_letter']}")
+                    
                     s1_pred_start_pipe, s1_pred_end_pipe = s1_predicted_times_for_batch[item_batch_idx]
+                    
+                    print(f"{step_info_prefix_eval_loop} S1 predicted times for video_id {item_data_transformed['video_id']}: {s1_pred_start_pipe}, {s1_pred_end_pipe}")
                     
                     if isinstance(s1_pred_start_pipe, (float,int)) and isinstance(s1_pred_end_pipe, (float,int)) and s1_pred_start_pipe <= s1_pred_end_pipe:
                         clip_start_s2_pipe, clip_end_s2_pipe = s1_pred_start_pipe, s1_pred_end_pipe
@@ -450,6 +470,8 @@ def run_cg_bench_evaluation_standalone(config: OmegaConf):
 
                     ele_s2_video_segment_cfg = {"video": item_data_transformed["video_path"], "video_start": clip_start_s2_pipe, "video_end": clip_end_s2_pipe, **video_proc_cfg_for_pipeline} 
                     s2_clipped_video_frames = fetch_video(ele_s2_video_segment_cfg, image_factor=video_proc_cfg_for_pipeline.get("image_factor", 28))
+                    print(f"{step_info_prefix_eval_loop} S2 video segment for video_id {item_data_transformed['video_id']} from {clip_start_s2_pipe} to {clip_end_s2_pipe} frames: {s2_clipped_video_frames.shape if s2_clipped_video_frames is not None else 'None'}")
+                    
                          
                     if s2_clipped_video_frames is None or s2_clipped_video_frames.nelement() == 0: 
                         print(f"{step_info_prefix_eval_loop} Warning: S2 clipped video failed for video_id {item_data_transformed['video_id']}. Skipping this item for S2 gen.")
@@ -506,6 +528,8 @@ def run_cg_bench_evaluation_standalone(config: OmegaConf):
                     reward_non_tensor_data['start_time'].append(item_data_for_reward_assembly['s1_gt_start_time'])
                     reward_non_tensor_data['end_time'].append(item_data_for_reward_assembly['s1_gt_end_time'])
                     reward_non_tensor_data['ground_truth_answer'].append(item_data_for_reward_assembly['s2_gt_answer_letter'])
+                    reward_non_tensor_data['video_length'].append(32 / sample_fps)
+                    reward_non_tensor_data['total_frames'].append(32)
                     items_to_score_indices_in_s2_tensor.append(i_s2_tensor)
             
             if reward_non_tensor_data['decoded_grounding_texts']: 
